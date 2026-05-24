@@ -1,0 +1,26 @@
+# Credenciais e configs sensíveis
+config_servidor.json
+*.json
+!docker-compose-vps.yml
+
+# Arquivos grandes (Excel, HTML gerado, backups)
+*.xlsx
+*.csv
+*.zip
+*.html
+!dashboard_svoboda_template.html
+!monitor_os_tv.html
+
+# Debug e temporários
+__pycache__/
+*.pyc
+debug_*.png
+debug_*.txt
+header_debug.txt
+_debug*.txt
+*.bak.*
+backup_*/
+
+# Gerados
+dashboard_svoboda_atualizado.html
+dashboard_index_backup.html

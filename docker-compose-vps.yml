@@ -1,0 +1,13 @@
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: dashboard-nginx
+    restart: unless-stopped
+    volumes:
+      - ./html:/usr/share/nginx/html:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard-rtflow.rule=Host(`svoboda.rtflowapp.com`)"
+      - "traefik.http.routers.dashboard-rtflow.entrypoints=websecure"
+      - "traefik.http.routers.dashboard-rtflow.tls.certresolver=letsencrypt"
+      - "traefik.http.services.dashboard-rtflow.loadbalancer.server.port=80"

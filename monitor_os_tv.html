@@ -1,0 +1,971 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="refresh" content="60">
+<meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="pragma" content="no-cache">
+<meta http-equiv="expires" content="0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Monitor TV - Sala de Controle</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f8fafc; --surface: #ffffff; --surface2: #f1f5f9;
+    --border: #e2e8f0; --accent: #0284c7; --green: #10b981;
+    --red: #ef4444; --yellow: #d97706; --text: #0f172a; --muted: #64748b;
+    --font-head: 'Syne', sans-serif; --font-mono: 'DM Mono', monospace;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:var(--font-head); overflow-x:hidden; }
+
+  .tv-header {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:16px 30px; background:#fff;
+    border-bottom:1px solid var(--border); box-shadow:0 2px 10px rgba(0,0,0,0.03);
+  }
+  .tv-title { font-size:22px; font-weight:800; display:flex; align-items:center; gap:12px; }
+  .pulse-dot { width:12px; height:12px; border-radius:50%; background:var(--red); animation:pulse 1.5s infinite; }
+  .tv-clock { font-family:var(--font-mono); font-size:20px; font-weight:700; background:var(--surface2); padding:4px 12px; border-radius:6px; }
+  .tv-update { font-family:var(--font-mono); font-size:12px; color:var(--muted); }
+
+  /* Regionais */
+  .regionais-row {
+    display:flex; gap:12px; padding:12px 30px; background:#fff;
+    border-bottom:1px solid var(--border); overflow-x:auto;
+  }
+  .regional-card {
+    background:var(--surface2); border-radius:10px; padding:10px 16px;
+    min-width:180px; flex-shrink:0;
+  }
+  .regional-nome { font-size:16px; font-weight:800; margin-bottom:6px; color:var(--accent); }
+  .regional-stats { display:flex; gap:10px; }
+  .stat { display:flex; flex-direction:column; align-items:center; }
+  .stat-num { font-family:var(--font-mono); font-size:18px; font-weight:800; }
+  .stat-num.green { color:var(--green); }
+  .stat-num.blue { color:var(--accent); }
+  .stat-num.orange { color:var(--yellow); }
+  .stat-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:1px; }
+
+  /* Paineis */
+  .panels { display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:0; height:calc(100vh - 140px); }
+  .panel {
+    padding:16px; overflow-y:auto; border-right:1px solid var(--border);
+  }
+  .panel-title {
+    font-size:16px; font-weight:800; margin-bottom:12px;
+    display:flex; align-items:center; gap:8px;
+    padding-bottom:8px; border-bottom:2px solid var(--border);
+  }
+  .panel-title .count { font-family:var(--font-mono); background:var(--surface2); padding:2px 8px; border-radius:4px; font-size:14px; }
+
+  .os-card {
+    background:var(--surface); border:2px solid var(--border);
+    border-radius:12px; padding:14px; margin-bottom:10px;
+    display:flex; flex-direction:column; gap:10px;
+    box-shadow:0 4px 12px rgba(0,0,0,0.04);
+  }
+  .os-card.danger { border-color:var(--red); background:rgba(239,68,68,0.03); animation:borderPulse 2s infinite; }
+  .os-card.warning { border-color:var(--yellow); background:rgba(217,119,6,0.03); }
+
+  .tec-info { display:flex; justify-content:space-between; align-items:flex-start; }
+  .tec-name { font-size:16px; font-weight:800; text-transform:uppercase; }
+  .os-number { font-family:var(--font-mono); color:var(--muted); font-size:13px; background:var(--surface2); padding:3px 8px; border-radius:6px; }
+  .os-type { font-size:13px; color:var(--accent); font-weight:700; }
+
+  .timer-box {
+    background:var(--surface2); border-radius:8px; padding:12px;
+    display:flex; flex-direction:column; align-items:center;
+    border:1px solid var(--border);
+  }
+  .timer-label { font-family:var(--font-mono); font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:2px; margin-bottom:4px; }
+  .timer-value { font-family:var(--font-mono); font-size:36px; font-weight:800; }
+
+  .danger .timer-box { background:#fff; border-color:rgba(239,68,68,0.2); }
+  .danger .timer-value { color:var(--red); text-shadow:0 2px 10px rgba(239,68,68,0.3); }
+  .danger.sla-estourado .timer-box { animation:pulse 1.5s infinite; }
+  .warning .timer-box { background:#fff; border-color:rgba(217,119,6,0.2); }
+  .warning .timer-value { color:var(--yellow); }
+  .safe .timer-value { color:var(--green); }
+
+  .empty-msg { text-align:center; padding:40px; color:var(--muted); font-size:18px; }
+
+  /* Retorno cards */
+  .retorno-motivo {
+    background:rgba(217,119,6,0.08); border:1px solid rgba(217,119,6,0.3);
+    border-radius:8px; padding:12px; text-align:center;
+  }
+  .retorno-label {
+    font-family:var(--font-mono); font-size:10px; color:var(--yellow);
+    text-transform:uppercase; letter-spacing:2px; margin-bottom:6px;
+  }
+  .retorno-texto {
+    font-size:16px; font-weight:800; color:var(--yellow);
+  }
+  .retorno-tentativas {
+    font-family:var(--font-mono); font-size:12px; color:var(--muted); margin-top:4px;
+  }
+  .danger .retorno-motivo {
+    background:rgba(239,68,68,0.08); border-color:rgba(239,68,68,0.3);
+  }
+  .danger .retorno-label, .danger .retorno-texto {
+    color:var(--red);
+  }
+
+  .fs-btn { background:var(--surface2); border:1px solid var(--border); color:var(--text); width:32px; height:32px; border-radius:6px; cursor:pointer; font-size:16px; display:flex; align-items:center; justify-content:center; transition:all 0.2s; }
+  .fs-btn:hover { background:var(--accent); color:#fff; border-color:var(--accent); }
+
+  @keyframes pulse { 0%,100%{opacity:1;box-shadow:0 0 8px rgba(239,68,68,0.6);} 50%{opacity:.4;box-shadow:none;} }
+  @keyframes borderPulse { 0%,100%{border-color:var(--red);box-shadow:0 0 15px rgba(239,68,68,0.15);} 50%{border-color:var(--border);box-shadow:none;} }
+</style>
+</head>
+<body>
+
+<div class="tv-header">
+  <div class="tv-title">
+    <div class="pulse-dot"></div>
+    SALA DE CONTROLE · SVOBODA
+  </div>
+  <div style="display:flex; align-items:center; gap:16px;">
+    <div style="text-align:right;">
+      <div class="tv-clock" id="main-clock">11:11:38</div>
+      <div class="tv-update">Atualizado: 09/05/2026 11:11:38</div>
+    </div>
+    <button class="fs-btn" onclick="toggleFS()" title="Tela Cheia">⛶</button>
+  </div>
+</div>
+
+<div class="regionais-row">
+        <div class="regional-card">
+          <div class="regional-nome">C.15</div>
+          <div class="regional-stats">
+            <div class="stat"><span class="stat-num">57</span><span class="stat-label">Total</span></div>
+            <div class="stat"><span class="stat-num green">13</span><span class="stat-label">Concl.</span></div>
+            <div class="stat"><span class="stat-num blue">7</span><span class="stat-label">Inic.</span></div>
+            <div class="stat"><span class="stat-num orange">1</span><span class="stat-label">Rota</span></div>
+            <div class="stat"><span class="stat-num">22.8%</span><span class="stat-label">Taxa</span></div>
+          </div>
+        </div>
+        <div class="regional-card">
+          <div class="regional-nome">C.16</div>
+          <div class="regional-stats">
+            <div class="stat"><span class="stat-num">65</span><span class="stat-label">Total</span></div>
+            <div class="stat"><span class="stat-num green">10</span><span class="stat-label">Concl.</span></div>
+            <div class="stat"><span class="stat-num blue">7</span><span class="stat-label">Inic.</span></div>
+            <div class="stat"><span class="stat-num orange">2</span><span class="stat-label">Rota</span></div>
+            <div class="stat"><span class="stat-num">15.4%</span><span class="stat-label">Taxa</span></div>
+          </div>
+        </div>
+        <div class="regional-card">
+          <div class="regional-nome">C.17</div>
+          <div class="regional-stats">
+            <div class="stat"><span class="stat-num">19</span><span class="stat-label">Total</span></div>
+            <div class="stat"><span class="stat-num green">7</span><span class="stat-label">Concl.</span></div>
+            <div class="stat"><span class="stat-num blue">2</span><span class="stat-label">Inic.</span></div>
+            <div class="stat"><span class="stat-num orange">0</span><span class="stat-label">Rota</span></div>
+            <div class="stat"><span class="stat-num">36.8%</span><span class="stat-label">Taxa</span></div>
+          </div>
+        </div>
+        <div class="regional-card">
+          <div class="regional-nome">C.18</div>
+          <div class="regional-stats">
+            <div class="stat"><span class="stat-num">24</span><span class="stat-label">Total</span></div>
+            <div class="stat"><span class="stat-num green">6</span><span class="stat-label">Concl.</span></div>
+            <div class="stat"><span class="stat-num blue">1</span><span class="stat-label">Inic.</span></div>
+            <div class="stat"><span class="stat-num orange">1</span><span class="stat-label">Rota</span></div>
+            <div class="stat"><span class="stat-num">25.0%</span><span class="stat-label">Taxa</span></div>
+          </div>
+        </div></div>
+
+<div class="panels">
+  <div class="panel">
+    <div class="panel-title">🔧 TEMPO NA O.S. <span class="count">17</span></div>
+    
+        <div class="os-card danger">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Alessandro Pereira Lopes</div>
+              <div class="os-type">Mudança de Endereço</div>
+            </div>
+            <div class="os-number">OS: 11924167</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778331780364">68:00</div>
+          </div>
+        </div>
+        <div class="os-card danger">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">FELIPE HENRIQUE CRRU CARVALHO</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11895539</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778333220368">44:00</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Willian do Carmo Teodoro</div>
+              <div class="os-type">Mudança de Endereço</div>
+            </div>
+            <div class="os-number">OS: 11930765</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778334300369">26:00</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Marco Antonio de Sena Goncalves</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11929394</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778334480364">23:00</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Anderson Correa Guimaraes</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11926240</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778334480367">23:00</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">WAGNER JULIO LOPES MENDES</div>
+              <div class="os-type">Mudança de Endereço</div>
+            </div>
+            <div class="os-number">OS: 11905114</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778334480369">23:00</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Jefferson de Oliveira Alves</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11910239</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778334660365">20:00</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Deyvid Vieira da Silva</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11922176</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778334840365">17:00</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">CRISTOVO PEREIRA DAMA</div>
+              <div class="os-type">Mudança de Endereço</div>
+            </div>
+            <div class="os-number">OS: 11928696</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778335080367">13:00</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">JONATHAS DE SOUZA HAMMES</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11909956</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778335080368">13:00</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">DARLAN MARQUES DANTAS</div>
+              <div class="os-type">Upgrade/Downgrade</div>
+            </div>
+            <div class="os-number">OS: 11917813</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778335140365">12:00</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Andre Martins Cordeiro Afonso</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11927942</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778335320368">09:00</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">David Carneiro Rodrigues</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11928946</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778335500369">06:00</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Claudio Henrique De Souza</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11930180</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778335560364">05:00</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">IGOR LOPES DA SILVA</div>
+              <div class="os-type">Reparo Corretivo</div>
+            </div>
+            <div class="os-number">OS: 11929803</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778335620367">04:00</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Pedro Henrique Dos Santos Da Silva</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11918205</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778335800365">01:00</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">MAIKE MARQUES MOTTA</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11928155</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778335800368">01:00</div>
+          </div>
+        </div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">🚗 DESLOCAMENTO <span class="count">4</span></div>
+    
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Leomir Fernandes Loredo</div>
+              <div class="os-type">Mudança de Endereço</div>
+            </div>
+            <div class="os-number">OS: 11930441</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778335440369">07:00</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">THIAGO RAMOS DE OLIVEIRA</div>
+              <div class="os-type">Mudança de Endereço</div>
+            </div>
+            <div class="os-number">OS: 11905459</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778335680368">03:00</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">JOSIEL SILVA DE ANDRADE</div>
+              <div class="os-type">Mudança de Endereço</div>
+            </div>
+            <div class="os-number">OS: 11927436</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778335740369">02:00</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Edson Thiago Marques Gomes</div>
+              <div class="os-type">Mudança de Endereço</div>
+            </div>
+            <div class="os-number">OS: 11926393</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">TEMPO DECORRIDO</div>
+            <div class="timer-value" data-start-epoch="1778336160365">00:00</div>
+          </div>
+        </div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">⏱️ SLA DE ATIVAÇÃO <span class="count">26</span></div>
+    
+        <div class="os-card danger sla-estourado">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Luiz Felipe Rodrigues De Fatima</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11856124</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="-28253">FORA DO PRAZO</div>
+          </div>
+        </div>
+        <div class="os-card danger sla-estourado">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">SVOBODA R6.1</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11873709</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="-20225">FORA DO PRAZO</div>
+          </div>
+        </div>
+        <div class="os-card danger sla-estourado">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">FELIPE HENRIQUE CRRU CARVALHO</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11895539</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="-11435">FORA DO PRAZO</div>
+          </div>
+        </div>
+        <div class="os-card danger sla-estourado">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">JONATHAS DE SOUZA HAMMES</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11909956</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="-4403">FORA DO PRAZO</div>
+          </div>
+        </div>
+        <div class="os-card danger sla-estourado">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Jefferson de Oliveira Alves</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11910239</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="-4360">FORA DO PRAZO</div>
+          </div>
+        </div>
+        <div class="os-card danger sla-estourado">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">CRISTOVO PEREIRA DAMA</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11915546</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="-2821">FORA DO PRAZO</div>
+          </div>
+        </div>
+        <div class="os-card danger sla-estourado">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">IGOR LOPES DA SILVA</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11915649</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="-2788">FORA DO PRAZO</div>
+          </div>
+        </div>
+        <div class="os-card danger sla-estourado">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">MAIKE MARQUES MOTTA</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11915760</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="-2766">FORA DO PRAZO</div>
+          </div>
+        </div>
+        <div class="os-card danger sla-estourado">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Anderson Correa Guimaraes</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11917193</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="-2511">FORA DO PRAZO</div>
+          </div>
+        </div>
+        <div class="os-card danger sla-estourado">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Pedro Henrique Dos Santos Da Silva</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11918205</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="-2251">FORA DO PRAZO</div>
+          </div>
+        </div>
+        <div class="os-card danger sla-estourado">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Deyvid Vieira da Silva</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11922176</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="-973">FORA DO PRAZO</div>
+          </div>
+        </div>
+        <div class="os-card danger sla-estourado">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Claudio Henrique De Souza</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11923259</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="-119">FORA DO PRAZO</div>
+          </div>
+        </div>
+        <div class="os-card warning">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">THIAGO RAMOS DE OLIVEIRA</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11924245</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="39">00h 39m</div>
+          </div>
+        </div>
+        <div class="os-card warning">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Edson Thiago Marques Gomes</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11924350</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="58">00h 58m</div>
+          </div>
+        </div>
+        <div class="os-card warning">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">JOAO PAULO OLIVEIRA DUARTE</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11924679</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="120">02h 00m</div>
+          </div>
+        </div>
+        <div class="os-card warning">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">WAGNER JULIO LOPES MENDES</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11924901</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="168">02h 48m</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">SVOBODA R5.3</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11927330</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="1271">21h 11m</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Andre Martins Cordeiro Afonso</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11927942</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="1390">23h 10m</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Marcos Antonio dos Santos Viegas Serra</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11928087</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="1411">23h 31m</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">David Carneiro Rodrigues</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11928330</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="1454">24h 14m</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Marco Antonio de Sena Goncalves</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11929394</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="1650">27h 30m</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Alessandro Pereira Lopes</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11929423</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="1654">27h 34m</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">THIAGO DA SILVA ARAUJO</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11929677</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="1697">28h 17m</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Marcelo dos Santos Serrador</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11930012</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="1768">29h 28m</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Jovane de Souza Oliveira</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11930097</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="1786">29h 46m</div>
+          </div>
+        </div>
+        <div class="os-card safe">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">DARLAN MARQUES DANTAS</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11930467</div>
+          </div>
+          <div class="timer-box">
+            <div class="timer-label">SLA RESTANTE</div>
+            <div class="timer-value timer-sla" data-min-restantes="1864">31h 04m</div>
+          </div>
+        </div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">🔄 RETORNOS <span class="count">8</span></div>
+    
+        <div class="os-card warning">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Anderson Correa Guimaraes</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11917193</div>
+          </div>
+          <div class="retorno-motivo">
+            <div class="retorno-label">⚠️ MOTIVO ANTERIOR</div>
+            <div class="retorno-texto">Cliente ausente</div>
+            <div class="retorno-tentativas">3ª tentativa</div>
+          </div>
+        </div>
+        <div class="os-card warning">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">SVOBODA R5.3</div>
+              <div class="os-type">Mudança de Endereço</div>
+            </div>
+            <div class="os-number">OS: 11896068</div>
+          </div>
+          <div class="retorno-motivo">
+            <div class="retorno-label">⚠️ MOTIVO ANTERIOR</div>
+            <div class="retorno-texto">Problema de infraestrutura</div>
+            <div class="retorno-tentativas">2ª tentativa</div>
+          </div>
+        </div>
+        <div class="os-card warning">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Alessandro Pereira Lopes</div>
+              <div class="os-type">Mudança de Endereço</div>
+            </div>
+            <div class="os-number">OS: 11924167</div>
+          </div>
+          <div class="retorno-motivo">
+            <div class="retorno-label">⚠️ MOTIVO ANTERIOR</div>
+            <div class="retorno-texto">Problema CTO</div>
+            <div class="retorno-tentativas">2ª tentativa</div>
+          </div>
+        </div>
+        <div class="os-card warning">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Claudio Henrique De Souza</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11923259</div>
+          </div>
+          <div class="retorno-motivo">
+            <div class="retorno-label">⚠️ MOTIVO ANTERIOR</div>
+            <div class="retorno-texto">Solicitação de reagendamento</div>
+            <div class="retorno-tentativas">2ª tentativa</div>
+          </div>
+        </div>
+        <div class="os-card warning">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Deyvid Vieira da Silva</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11922176</div>
+          </div>
+          <div class="retorno-motivo">
+            <div class="retorno-label">⚠️ MOTIVO ANTERIOR</div>
+            <div class="retorno-texto">Endereço não localizado</div>
+            <div class="retorno-tentativas">2ª tentativa</div>
+          </div>
+        </div>
+        <div class="os-card warning">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">Deyvid Vieira da Silva</div>
+              <div class="os-type">Mudança de Endereço</div>
+            </div>
+            <div class="os-number">OS: 11922307</div>
+          </div>
+          <div class="retorno-motivo">
+            <div class="retorno-label">⚠️ MOTIVO ANTERIOR</div>
+            <div class="retorno-texto">Endereço não localizado</div>
+            <div class="retorno-tentativas">2ª tentativa</div>
+          </div>
+        </div>
+        <div class="os-card warning">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">CRISTOVO PEREIRA DAMA</div>
+              <div class="os-type">Mudança de Endereço</div>
+            </div>
+            <div class="os-number">OS: 11928696</div>
+          </div>
+          <div class="retorno-motivo">
+            <div class="retorno-label">⚠️ MOTIVO ANTERIOR</div>
+            <div class="retorno-texto">Entrada não autorizada</div>
+            <div class="retorno-tentativas">2ª tentativa</div>
+          </div>
+        </div>
+        <div class="os-card warning">
+          <div class="tec-info">
+            <div>
+              <div class="tec-name">THIAGO RAMOS DE OLIVEIRA</div>
+              <div class="os-type">Ativação</div>
+            </div>
+            <div class="os-number">OS: 11924245</div>
+          </div>
+          <div class="retorno-motivo">
+            <div class="retorno-label">⚠️ MOTIVO ANTERIOR</div>
+            <div class="retorno-texto">Problema CTO</div>
+            <div class="retorno-tentativas">2ª tentativa</div>
+          </div>
+        </div>
+  </div>
+</div>
+
+<script>
+  setInterval(() => {
+    document.getElementById('main-clock').textContent = new Date().toLocaleTimeString('pt-BR');
+  }, 1000);
+
+  // Cronometros ao vivo (epoch: tempo real para O.S. e Deslocamento)
+  const timers = document.querySelectorAll('.timer-value:not(.timer-sla)');
+  setInterval(() => {
+    const agora = Date.now();
+    timers.forEach(t => {
+      const epoch = parseInt(t.dataset.startEpoch);
+      if (!epoch) return;
+      let diffMs = agora - epoch;
+      if (diffMs < 0) diffMs = 0;
+      const totalSec = Math.floor(diffMs / 1000);
+      const min = Math.floor(totalSec / 60);
+      const sec = totalSec % 60;
+      t.textContent = min.toString().padStart(2,'0') + ':' + sec.toString().padStart(2,'0');
+
+      // Atualiza cor dinamicamente
+      const card = t.closest('.os-card');
+      if (!card) return;
+      const panel = card.closest('.panel');
+      const isOS = panel && panel.querySelector('.panel-title').textContent.includes('O.S.');
+      const limVermelho = isOS ? 40 : 20;
+      const limAmarelo = isOS ? 30 : 15;
+
+      card.classList.remove('danger','warning','safe');
+      if (min >= limVermelho) card.classList.add('danger');
+      else if (min >= limAmarelo) card.classList.add('warning');
+      else card.classList.add('safe');
+    });
+  }, 1000);
+
+  // Fullscreen function
+  function toggleFS() {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(err => {
+        console.log(`Error attempting to enable fullscreen: ${err.message}`);
+      });
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen();
+      }
+    }
+  }
+</script>
+
+</body>
+</html>
