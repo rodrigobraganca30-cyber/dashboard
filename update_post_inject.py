@@ -165,7 +165,7 @@ def inject_wa_mapping_modal(html):
     fields.forEach(function(f) {
       var patterns = {
         nome:['nome','name','cliente','assinante','titular'],
-        telefone:['telefone','celular','phone','tel','fone','whatsapp','numero','contato'],
+        telefone:['telefone celular','celular','whatsapp','telefone','phone','tel','fone','numero','contato'],
         data:['data','date','dia','agendamento'],
         cidade:['cidade','city','municipio'],
         endereco:['endereco','address','logradouro','rua'],
