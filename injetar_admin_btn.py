@@ -20,6 +20,11 @@ ADMIN_BTNS = '''<!-- TF_ADMIN_BTNS -->
 '''
 
 def main():
+    # DEPRECATED: botoes admin agora sao injetados exclusivamente pelo post_inject.py
+    print("[SKIP] injetar_admin_btn.py DEPRECATED — botoes admin sao injetados pelo post_inject.py")
+    return
+
+    # Codigo abaixo nunca executa (mantido para referencia)
     if not os.path.exists(INDEX_HTML):
         print(f"[ERRO] {INDEX_HTML} nao encontrado!")
         return
@@ -29,6 +34,11 @@ def main():
 
     if ADMIN_MARKER in html:
         print("[OK] Botoes de admin ja estao no index.html")
+        return
+
+    # Se o post_inject.py já injetou os botões (melhor versão), não duplicar
+    if 'btn-logout-dash' in html:
+        print("[OK] Botoes de admin ja injetados pelo post_inject.py — pulando")
         return
 
     # Injeta logo apos <body>

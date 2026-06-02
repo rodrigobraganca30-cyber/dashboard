@@ -72,29 +72,36 @@ const KEY_PHONE_ID = (phone) => `agenda:phone2id:${phone}`;
 const KEY_TEMPLATES = 'agenda:templates';
 const KEY_CAMPAIGNS = 'agenda:campaigns';
 const KEY_UNREAD   = (phone) => `agenda:unread:${phone}`;
+const KEY_BLACKLIST = 'agenda:blacklist';
 
-// SCAN helper — substitui redis.keys() que é O(N) e bloqueia
-async function scanKeys(pattern, count = 200) {
-  const keys = [];
-  let cursor = '0';
-  do {
-    const result = await redis.scan(cursor, { MATCH: pattern, COUNT: count });
-    cursor = result.cursor.toString();
-    keys.push(...result.keys);
-  } while (cursor !== '0');
-  return keys;
+// ── BLACKLIST: Validação de telefone ──
+function validateAndCleanPhone(raw) {
+  if (!raw) return { valid: false, number: '', reason: 'vazio' };
+  const cleaned = String(raw).replace(/\D/g, '');
+  if (cleaned.length < 10) return { valid: false, number: cleaned, reason: 'curto' };
+  if (cleaned.length > 13) return { valid: false, number: cleaned, reason: 'longo' };
+  let number = cleaned;
+  if (!number.startsWith('55')) number = '55' + number;
+  // Aceita 12 dígitos (sem 9° dígito) ou 13 dígitos (com 9° dígito)
+  if (number.length < 12 || number.length > 13) return { valid: false, number, reason: 'len inválido' };
+  return { valid: true, number };
 }
 
-// In-memory cache simples (para /conversations)
-const cache = {};
-function cached(key, ttlMs, fn) {
-  return async (...args) => {
-    const now = Date.now();
-    if (cache[key] && now - cache[key].ts < ttlMs) return cache[key].data;
-    const data = await fn(...args);
-    cache[key] = { data, ts: now };
-    return data;
-  };
+// ── Helper: gera variação com/sem 9° dígito ──
+// Ex: 5554996676748 (com 9) → 555496676748 (sem 9) e vice-versa
+function getPhoneVariant(phone) {
+  const clean = String(phone).replace(/\D/g, '');
+  if (!clean.startsWith('55') || clean.length < 12) return null;
+  const ddd = clean.substring(2, 4);
+  const rest = clean.substring(4);
+  if (clean.length === 13 && rest.length === 9 && rest.startsWith('9')) {
+    // Tem 9° dígito → gera versão sem
+    return '55' + ddd + rest.substring(1);
+  } else if (clean.length === 12 && rest.length === 8) {
+    // Sem 9° dígito → gera versão com
+    return '55' + ddd + '9' + rest;
+  }
+  return null;
 }
 
 async function setStatus(clientId, status, obs = '') {
@@ -126,7 +133,26 @@ async function appendMsg(phone, msg) {
 
 async function getMsgs(phone) {
   const raw = await redis.get(KEY_MSGS(phone));
-  return raw ? JSON.parse(raw) : [];
+  const msgs = raw ? JSON.parse(raw) : [];
+  // ── Unificação: busca mensagens da variação com/sem 9° dígito ──
+  const variant = getPhoneVariant(phone);
+  if (variant) {
+    const rawV = await redis.get(KEY_MSGS(variant));
+    if (rawV) {
+      const msgsV = JSON.parse(rawV);
+      // Mescla e ordena por timestamp, removendo duplicatas
+      const merged = [...msgs, ...msgsV];
+      merged.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+      // Remove duplicatas (mesmo from + text + ts próximo)
+      const deduped = [];
+      for (const m of merged) {
+        const isDup = deduped.some(d => d.from === m.from && d.text === m.text && Math.abs((d.ts || 0) - (m.ts || 0)) < 5000);
+        if (!isDup) deduped.push(m);
+      }
+      return deduped;
+    }
+  }
+  return msgs;
 }
 
 // ──────────────────────────────────────────────
@@ -165,12 +191,15 @@ function extractTemplateParams(templateText, clientData, remetente) {
   const matches = [...templateText.matchAll(/\{\{([^}]+)\}\}/g)];
   const parameters = [];
 
+  // Resolve intervalo: prioriza 'intervalo', fallback para 'horario'
+  const intervaloValue = clientData.intervalo || clientData.horario || '';
+
   // Mapeamento numérico: {{1}}→nome, {{2}}→data, {{3}}→cidade, etc.
   const numericFields = [
     clientData.nome || '',
     clientData.data || '',
     clientData.cidade || '',
-    clientData.horario || '',
+    intervaloValue,
     clientData.endereco || '',
     clientData.tipo || '',
     remetente || ''
@@ -189,7 +218,8 @@ function extractTemplateParams(templateText, clientData, remetente) {
     else if (varName === 'nome') textValue = clientData.nome || '';
     else if (varName === 'data') textValue = clientData.data || '';
     else if (varName === 'cidade') textValue = clientData.cidade || '';
-    else if (varName === 'horario') textValue = clientData.horario || '';
+    else if (varName === 'intervalo') textValue = intervaloValue;
+    else if (varName === 'horario') textValue = intervaloValue;
     else if (varName === 'endereco') textValue = clientData.endereco || '';
     else if (varName === 'tipo') textValue = clientData.tipo || '';
     else if (varName === 'remetente') textValue = remetente || '';
@@ -463,6 +493,18 @@ app.post('/status/:clientId', async (req, res) => {
   try {
     const { status, obs } = req.body;
     await setStatus(req.params.clientId, status, obs);
+
+    // Blacklist sync: se status == "bloqueado", adiciona telefone à blacklist
+    if (status === 'bloqueado') {
+      const cid = req.params.clientId;
+      const phonePart = cid.replace(/^wa_/, '').split('_')[0];
+      const v = validateAndCleanPhone(phonePart);
+      if (v.valid) {
+        await redis.sAdd(KEY_BLACKLIST, v.number);
+        log('info', 'Blacklist: número adicionado via status bloqueado', { phone: v.number, clientId: cid });
+      }
+    }
+
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -488,6 +530,14 @@ app.post('/send', async (req, res) => {
 
     const { phone, text, clientId } = req.body;
     if (!phone || !text) return res.status(400).json({ error: 'phone e text obrigatórios' });
+
+    // ── Blacklist check (verifica ambas variações com/sem 9° dígito) ──
+    const vSend = validateAndCleanPhone(phone);
+    if (!vSend.valid) return res.status(400).json({ error: 'Número inválido', reason: vSend.reason });
+    const isBlocked = await redis.sIsMember(KEY_BLACKLIST, vSend.number);
+    const variantSend = getPhoneVariant(vSend.number);
+    const isBlockedVariant = variantSend ? await redis.sIsMember(KEY_BLACKLIST, variantSend) : false;
+    if (isBlocked || isBlockedVariant) return res.status(403).json({ error: 'Número bloqueado (blacklist)', phone: vSend.number });
 
     const instance = 'Meta_API_Oficial';
     const result = await sendText(phone, text);
@@ -573,6 +623,25 @@ app.post('/send-bulk', async (req, res) => {
       let success = 0, failed = 0;
       for (let idx = 0; idx < clients.length; idx++) {
         const c = clients[idx];
+        // ── Blacklist: validar e pular se bloqueado ──
+        const rawPhone = c.phone || c.tel1 || c.tel2 || '';
+        const vBulk = validateAndCleanPhone(rawPhone);
+        if (!vBulk.valid) {
+          log('warn', 'Número inválido, adicionando à blacklist', { nome: c.nome, phone: rawPhone, reason: vBulk.reason });
+          if (vBulk.number) await redis.sAdd(KEY_BLACKLIST, vBulk.number);
+          await setStatus(c.id, 'bloqueado', 'Número inválido: ' + vBulk.reason);
+          failed++;
+          continue;
+        }
+        const isBl = await redis.sIsMember(KEY_BLACKLIST, vBulk.number);
+        const variantBulk = getPhoneVariant(vBulk.number);
+        const isBlVariant = variantBulk ? await redis.sIsMember(KEY_BLACKLIST, variantBulk) : false;
+        if (isBl || isBlVariant) {
+          log('info', 'Número na blacklist, pulando', { nome: c.nome, phone: vBulk.number });
+          await setStatus(c.id, 'bloqueado', 'Número na blacklist');
+          failed++;
+          continue;
+        }
         // Rodízio de templates
         const chosenTpl = tpls[idx % tpls.length];
         try {
@@ -600,13 +669,13 @@ app.post('/send-bulk', async (req, res) => {
 
           // Fallback: se é um template Meta e nenhum param foi detectado no texto,
           // envia campos do cliente como parâmetros na ordem:
-          // {{1}}=nome, {{2}}=data, {{3}}=cidade, {{4}}=horario, {{5}}=endereco, {{6}}=tipo, {{7}}=remetente
+          // {{1}}=nome, {{2}}=data, {{3}}=cidade, {{4}}=intervalo/horario, {{5}}=endereco, {{6}}=tipo, {{7}}=remetente
           if (params.length === 0 && metaTemplateName) {
             const fallbackFields = [
               c.nome || ' ',
               c.data || ' ',
               c.cidade || ' ',
-              c.horario || ' ',
+              c.intervalo || c.horario || ' ',
               c.endereco || ' ',
               c.tipo || ' ',
               remetente || ' '
@@ -621,12 +690,14 @@ app.post('/send-bulk', async (req, res) => {
           await sendTemplate(c.phone || c.tel1 || c.tel2, templateName, components, metaTemplateLang || 'pt_BR');
 
           const tplText = typeof chosenTpl === 'string' ? chosenTpl : (chosenTpl.text || '');
+          const _intervalo = c.intervalo || c.horario || '';
           const text = tplText
             // Chave dupla {{nome}}
             .replace(/\{\{nome\}\}/gi, c.nome || '')
             .replace(/\{\{data\}\}/gi, c.data || '')
             .replace(/\{\{cidade\}\}/gi, c.cidade || '')
-            .replace(/\{\{horario\}\}/gi, c.horario || '')
+            .replace(/\{\{intervalo\}\}/gi, _intervalo)
+            .replace(/\{\{horario\}\}/gi, _intervalo)
             .replace(/\{\{endereco\}\}/gi, c.endereco || '')
             .replace(/\{\{tipo\}\}/gi, c.tipo || '')
             .replace(/\{\{remetente\}\}/gi, remetente || '')
@@ -634,7 +705,8 @@ app.post('/send-bulk', async (req, res) => {
             .replace(/\{nome\}/gi, c.nome || '')
             .replace(/\{data\}/gi, c.data || '')
             .replace(/\{cidade\}/gi, c.cidade || '')
-            .replace(/\{horario\}/gi, c.horario || '')
+            .replace(/\{intervalo\}/gi, _intervalo)
+            .replace(/\{horario\}/gi, _intervalo)
             .replace(/\{endereco\}/gi, c.endereco || '')
             .replace(/\{tipo\}/gi, c.tipo || '')
             .replace(/\{remetente\}/gi, remetente || '')
@@ -642,7 +714,7 @@ app.post('/send-bulk', async (req, res) => {
             .replace(/\{\{1\}\}/g, c.nome || '')
             .replace(/\{\{2\}\}/g, c.data || '')
             .replace(/\{\{3\}\}/g, c.cidade || '')
-            .replace(/\{\{4\}\}/g, c.horario || '')
+            .replace(/\{\{4\}\}/g, _intervalo)
             .replace(/\{\{5\}\}/g, c.endereco || '')
             .replace(/\{\{6\}\}/g, c.tipo || '')
             .replace(/\{\{7\}\}/g, remetente || '');
@@ -660,6 +732,17 @@ app.post('/send-bulk', async (req, res) => {
           log('info', 'Enviado', { nome: c.nome, phone: number, instance, tplIdx: idx % tpls.length });
         } catch (e) {
           failed++;
+          const errData = e.response?.data?.error || {};
+          const errCode = errData.code || 0;
+          // Auto-blacklist: erro 131026 (número inválido na Meta)
+          if (errCode === 131026 || errCode === 131052 || errCode === 131049) {
+            const ph = (c.phone || c.tel1 || c.tel2 || '').replace(/\D/g, '');
+            let blNum = ph;
+            if (!blNum.startsWith('55')) blNum = '55' + blNum;
+            await redis.sAdd(KEY_BLACKLIST, blNum);
+            await setStatus(c.id, 'bloqueado', 'Erro Meta ' + errCode);
+            log('warn', 'Auto-blacklist por erro Meta', { phone: blNum, errCode, nome: c.nome });
+          }
           log('error', 'Falha envio', { nome: c.nome, error: e.response?.data || e.message });
         }
 
@@ -707,15 +790,12 @@ app.post('/send-reply', async (req, res) => {
 // GET /all-status — retorna todos os status salvos (para sync do frontend)
 app.get('/all-status', async (req, res) => {
   try {
-    const keys = await scanKeys('agenda:status:*');
+    const keys = await redis.keys('agenda:status:*');
     const result = {};
-    // Batch com pipeline para não fazer N gets sequenciais
-    if (keys.length > 0) {
-      const values = await Promise.all(keys.map(k => redis.get(k)));
-      for (let i = 0; i < keys.length; i++) {
-        const id = keys[i].replace('agenda:status:', '');
-        result[id] = values[i] ? JSON.parse(values[i]) : null;
-      }
+    for (const key of keys) {
+      const id = key.replace('agenda:status:', '');
+      const v = await redis.get(key);
+      result[id] = v ? JSON.parse(v) : null;
     }
     res.json(result);
   } catch (e) {
@@ -726,17 +806,56 @@ app.get('/all-status', async (req, res) => {
 // GET /unread — retorna contadores de não lidas
 app.get('/unread', async (req, res) => {
   try {
-    const keys = await scanKeys('agenda:unread:*');
+    const keys = await redis.keys('agenda:unread:*');
     const result = {};
-    if (keys.length > 0) {
-      const values = await Promise.all(keys.map(k => redis.get(k)));
-      for (let i = 0; i < keys.length; i++) {
-        const phone = keys[i].replace('agenda:unread:', '');
-        const count = values[i] ? parseInt(values[i]) : 0;
-        if (count > 0) result[phone] = count;
-      }
+    for (const key of keys) {
+      const phone = key.replace('agenda:unread:', '');
+      const count = await redis.get(key);
+      if (count && parseInt(count) > 0) result[phone] = parseInt(count);
     }
     res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ──────────────────────────────────────────────
+// BLACKLIST ROUTES
+// ──────────────────────────────────────────────
+app.get('/agenda/blacklist', async (req, res) => {
+  try {
+    const members = await redis.sMembers(KEY_BLACKLIST);
+    res.json(members || []);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/agenda/blacklist', async (req, res) => {
+  try {
+    const { numbers } = req.body;
+    if (!Array.isArray(numbers)) return res.status(400).json({ error: 'numbers deve ser array' });
+    let added = 0;
+    for (const n of numbers) {
+      const r = validateAndCleanPhone(n);
+      if (r.valid) { await redis.sAdd(KEY_BLACKLIST, r.number); added++; }
+    }
+    res.json({ ok: true, added });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/agenda/blacklist', async (req, res) => {
+  try {
+    const { numbers } = req.body;
+    if (!Array.isArray(numbers)) return res.status(400).json({ error: 'numbers deve ser array' });
+    let removed = 0;
+    for (const n of numbers) {
+      const r = validateAndCleanPhone(n);
+      if (r.valid) { await redis.sRem(KEY_BLACKLIST, r.number); removed++; }
+    }
+    res.json({ ok: true, removed });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -828,13 +947,11 @@ app.delete('/templates/:id', async (req, res) => {
 // ──────────────────────────────────────────────
 app.get('/campaigns', async (req, res) => {
   try {
-    const keys = await scanKeys('agenda:campaign:*');
+    const keys = await redis.keys('agenda:campaign:*');
     const campaigns = [];
-    if (keys.length > 0) {
-      const values = await Promise.all(keys.map(k => redis.get(k)));
-      for (const v of values) {
-        if (v) campaigns.push(JSON.parse(v));
-      }
+    for (const key of keys) {
+      const v = await redis.get(key);
+      if (v) campaigns.push(JSON.parse(v));
     }
     campaigns.sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt));
     res.json(campaigns.slice(0, 20));
@@ -848,17 +965,14 @@ app.get('/campaigns', async (req, res) => {
 // ──────────────────────────────────────────────
 app.get('/export-csv', async (req, res) => {
   try {
-    const keys = await scanKeys('agenda:status:*');
+    const keys = await redis.keys('agenda:status:*');
     let csv = 'ClienteID,Status,Observação,Atualizado Em\n';
-    if (keys.length > 0) {
-      const values = await Promise.all(keys.map(k => redis.get(k)));
-      for (let i = 0; i < keys.length; i++) {
-        const id = keys[i].replace('agenda:status:', '');
-        const v = values[i];
-        if (v) {
-          const d = JSON.parse(v);
-          csv += `"${id}","${d.status}","${(d.obs || '').replace(/"/g, '""')}","${d.updatedAt || ''}"\n`;
-        }
+    for (const key of keys) {
+      const id = key.replace('agenda:status:', '');
+      const v = await redis.get(key);
+      if (v) {
+        const d = JSON.parse(v);
+        csv += `"${id}","${d.status}","${(d.obs || '').replace(/"/g, '""')}","${d.updatedAt || ''}"\n`;
       }
     }
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -874,16 +988,14 @@ app.get('/export-csv', async (req, res) => {
 // ──────────────────────────────────────────────
 app.get('/dashboard-summary', async (req, res) => {
   try {
-    const keys = await scanKeys('agenda:status:*');
+    const keys = await redis.keys('agenda:status:*');
     const summary = { total: 0, confirmado: 0, pendente: 0, 'nao-atendido': 0, reagendado: 0 };
-    if (keys.length > 0) {
-      const values = await Promise.all(keys.map(k => redis.get(k)));
-      for (const v of values) {
-        if (v) {
-          const d = JSON.parse(v);
-          summary.total++;
-          summary[d.status] = (summary[d.status] || 0) + 1;
-        }
+    for (const key of keys) {
+      const v = await redis.get(key);
+      if (v) {
+        const d = JSON.parse(v);
+        summary.total++;
+        summary[d.status] = (summary[d.status] || 0) + 1;
       }
     }
     summary.taxa_confirmacao = summary.total > 0
@@ -970,10 +1082,69 @@ app.post('/webhook', async (req, res) => {
             await appendMsg(phone, { from: 'client', text, ts: Date.now(), instance });
             await redis.incr(KEY_UNREAD(phone));
 
-            // ── JARVIS IA ──────────────────────────────
+            // ── FLUXO AUTOMÁTICO POR BOTÃO META ──────────────
             const clientId = await redis.get(KEY_PHONE_ID(phone));
-            const jarvisUrl = process.env.JARVIS_URL || 'http://jarvis-app:8501';
             let jarvisHandled = false;
+
+            // Mapa de botão → status (fixo) — mensagens vêm do Redis
+            const BUTTON_STATUS = {
+              'sim, confirmo': 'confirmado', 'preciso reagendar': 'reagendado', 'cancelar': 'nao-atendido',
+              'agendar': 'agendado', 'já devolvi': 'resolvido', 'ja devolvi': 'resolvido',
+              'sim, tudo certo': 'satisfeito',
+              'não, tenho problema': 'problema-aberto', 'nao, tenho problema': 'problema-aberto',
+              'quero falar com alguém': 'problema-aberto', 'quero falar com alguem': 'problema-aberto',
+            };
+            // Ler mensagens editáveis do Redis
+            let btnMsgs = null;
+            try {
+              const cfgRaw = await redis.get('agenda:button-config');
+              btnMsgs = cfgRaw ? JSON.parse(cfgRaw) : null;
+            } catch(e) {}
+            if (!btnMsgs) {
+              btnMsgs = {
+                'sim, confirmo': 'Perfeito, NOME! Seu atendimento está confirmado. Nossa equipe estará no local conforme agendado. Obrigado!',
+                'preciso reagendar': 'Sem problemas, NOME! Por favor, nos informe uma nova data e horário de sua preferência.',
+                'cancelar': 'Entendido, NOME. Seu atendimento foi cancelado. Caso precise, entre em contato conosco.',
+                'agendar': 'Certo, NOME! Por favor, nos informe uma data e horário para agendarmos a retirada do equipamento.',
+                'ja devolvi': 'Obrigado pela informação, NOME! Vamos verificar e atualizar nosso sistema.',
+                'sim, tudo certo': 'Que bom saber, NOME! Ficamos felizes que está tudo funcionando. Qualquer dúvida, estamos à disposição!',
+                'nao, tenho problema': 'Lamentamos, NOME. Nossa equipe de suporte será acionada para resolver o quanto antes.',
+                'quero falar com alguem': 'Certo, NOME! Um de nossos atendentes entrará em contato em breve.'
+              };
+            }
+            const BUTTON_FLOWS = {};
+            for (const [btn, st] of Object.entries(BUTTON_STATUS)) {
+              const normalKey = btn.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+              BUTTON_FLOWS[btn] = { status: st, msg: btnMsgs[btn] || btnMsgs[normalKey] || 'Obrigado pelo retorno!' };
+            }
+
+            const btnKey = text.toLowerCase().trim();
+            const btnFlow = BUTTON_FLOWS[btnKey];
+            if (btnFlow && clientId) {
+              try {
+                const cRaw = await redis.get(KEY_CLIENTS);
+                const cList = cRaw ? JSON.parse(cRaw) : [];
+                const cData = cList.find(c => c.id === clientId) || {};
+                const firstName = (cData.nome || 'Cliente').split(' ')[0];
+                const firstName2 = firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase();
+                const replyMsg = btnFlow.msg.replace(/NOME/g, firstName2);
+
+                await setStatus(clientId, btnFlow.status, 'Botão: "' + text + '"');
+                await sendText(phone, replyMsg);
+                await appendMsg(phone, { from: 'me', text: replyMsg, ts: Date.now(), instance: 'Meta API Oficial' });
+                jarvisHandled = true;
+                log('info', 'Fluxo botão processado', { phone, button: text, status: btnFlow.status, clientId });
+              } catch (btnErr) {
+                log('error', 'Erro no fluxo botão', { phone, button: text, error: btnErr.message });
+              }
+            }
+            // ── FIM FLUXO BOTÃO ──────────────────────────────
+
+
+            // ── JARVIS IA ──────────────────────────────
+            // clientId já declarado acima (BUTTON_FLOWS)
+            const jarvisUrl = process.env.JARVIS_URL || 'http://jarvis-app:8501';
+            // jarvisHandled já declarado acima (BUTTON_FLOWS)
 
             if (clientId && shouldCallJarvis(phone)) {
               const eligible = await isEligibleForJarvis(clientId);
@@ -1066,53 +1237,79 @@ app.post('/webhook', async (req, res) => {
 // ──────────────────────────────────────────────
 // CONVERSATIONS — lista conversas para a aba Chat
 // ──────────────────────────────────────────────
-// Função interna para construir lista de conversas (com cache de 30s)
-const buildConversations = cached('conversations', 30000, async () => {
-  const msgKeys = await scanKeys('agenda:msgs:*');
-  const conversations = [];
-
-  // Batch: busca msgs e unreads em paralelo (não sequencial)
-  const batchSize = 50;
-  for (let i = 0; i < msgKeys.length; i += batchSize) {
-    const batch = msgKeys.slice(i, i + batchSize);
-    const phones = batch.map(k => k.replace('agenda:msgs:', ''));
-    const [msgValues, unreadValues] = await Promise.all([
-      Promise.all(batch.map(k => redis.get(k))),
-      Promise.all(phones.map(p => redis.get(KEY_UNREAD(p))))
-    ]);
-
-    for (let j = 0; j < batch.length; j++) {
-      const raw = msgValues[j];
-      if (!raw) continue;
-      const msgs = JSON.parse(raw);
-      if (!msgs.length) continue;
-      const lastMsg = msgs[msgs.length - 1];
-      conversations.push({
-        phone: phones[j],
-        lastMessage: (lastMsg.text || '').substring(0, 100),
-        lastTs: lastMsg.ts,
-        lastFrom: lastMsg.from,
-        unread: unreadValues[j] ? parseInt(unreadValues[j]) : 0
-      });
-    }
-  }
-
-  conversations.sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
-  return conversations;
-});
-
 app.get('/conversations', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
-    const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+    const limit = parseInt(req.query.limit) || 50;
 
-    const conversations = await buildConversations();
-    const total = conversations.length;
+    // Busca todas as chaves de mensagens no Redis
+    const msgKeys = await redis.keys('agenda:msgs:*');
+    const conversations = [];
+
+    for (const key of msgKeys) {
+      const phone = key.replace('agenda:msgs:', '');
+      const raw = await redis.get(key);
+      if (!raw) continue;
+
+      const msgs = JSON.parse(raw);
+      if (!msgs.length) continue;
+
+      const lastMsg = msgs[msgs.length - 1];
+      const unreadRaw = await redis.get(KEY_UNREAD(phone));
+      const unread = unreadRaw ? parseInt(unreadRaw) : 0;
+
+      conversations.push({
+        phone,
+        lastMessage: (lastMsg.text || '').substring(0, 100),
+        lastTs: lastMsg.ts,
+        lastFrom: lastMsg.from,
+        unread
+      });
+    }
+
+    // ── Deduplicação: unifica conversas com/sem 9° dígito ──
+    // Agrupa por DDD + 8 dígitos finais, mantém o registro com lastTs mais recente
+    const deduped = [];
+    const seen = new Map(); // chave: DDD+8ultimos → índice no array deduped
+    for (const c of conversations) {
+      const clean = (c.phone || '').replace(/\D/g, '');
+      if (clean.length >= 12 && clean.startsWith('55')) {
+        const ddd = clean.substring(2, 4);
+        const last8 = clean.slice(-8);
+        const dedupKey = ddd + last8;
+        if (seen.has(dedupKey)) {
+          // Já existe — mantém o com lastTs mais recente, soma unreads
+          const idx = seen.get(dedupKey);
+          const existing = deduped[idx];
+          if ((c.lastTs || 0) > (existing.lastTs || 0)) {
+            c.unread = (c.unread || 0) + (existing.unread || 0);
+            deduped[idx] = c;
+          } else {
+            existing.unread = (existing.unread || 0) + (c.unread || 0);
+          }
+        } else {
+          seen.set(dedupKey, deduped.length);
+          deduped.push(c);
+        }
+      } else {
+        deduped.push(c);
+      }
+    }
+
+    // Ordena por timestamp mais recente
+    deduped.sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
+
+    const total = deduped.length;
     const pages = Math.ceil(total / limit) || 1;
     const start = (page - 1) * limit;
-    const sliced = conversations.slice(start, start + limit);
+    const sliced = deduped.slice(start, start + limit);
 
-    res.json({ conversations: sliced, page, pages, total });
+    res.json({
+      conversations: sliced,
+      page,
+      pages,
+      total
+    });
   } catch (e) {
     log('error', 'Erro ao listar conversas', { error: e.message });
     res.status(500).json({ error: e.message });
@@ -1122,6 +1319,41 @@ app.get('/conversations', async (req, res) => {
 // ──────────────────────────────────────────────
 // HEALTH
 // ──────────────────────────────────────────────
+
+// ──────────────────────────────────────────────
+// BUTTON CONFIG — Mensagens editáveis dos botões
+// ──────────────────────────────────────────────
+const KEY_BUTTON_CONFIG = 'agenda:button-config';
+
+const DEFAULT_BUTTON_CONFIG = {
+  'sim, confirmo':          'Perfeito, NOME! Seu atendimento está confirmado. Nossa equipe estará no local conforme agendado. Obrigado!',
+  'preciso reagendar':      'Sem problemas, NOME! Por favor, nos informe uma nova data e horário de sua preferência.',
+  'cancelar':               'Entendido, NOME. Seu atendimento foi cancelado. Caso precise, entre em contato conosco.',
+  'agendar':                'Certo, NOME! Por favor, nos informe uma data e horário para agendarmos a retirada do equipamento.',
+  'ja devolvi':             'Obrigado pela informação, NOME! Vamos verificar e atualizar nosso sistema.',
+  'sim, tudo certo':        'Que bom saber, NOME! Ficamos felizes que está tudo funcionando. Qualquer dúvida, estamos à disposição!',
+  'nao, tenho problema':    'Lamentamos, NOME. Nossa equipe de suporte será acionada para resolver o quanto antes.',
+  'quero falar com alguem': 'Certo, NOME! Um de nossos atendentes entrará em contato em breve.'
+};
+
+app.get('/button-config', async (req, res) => {
+  try {
+    const raw = await redis.get(KEY_BUTTON_CONFIG);
+    res.json(raw ? JSON.parse(raw) : DEFAULT_BUTTON_CONFIG);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/button-config', async (req, res) => {
+  try {
+    const existing = await redis.get(KEY_BUTTON_CONFIG);
+    const current = existing ? JSON.parse(existing) : DEFAULT_BUTTON_CONFIG;
+    const merged = { ...current, ...req.body };
+    await redis.set(KEY_BUTTON_CONFIG, JSON.stringify(merged));
+    res.json({ ok: true, config: merged });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
 app.get('/health', (_, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 app.get('/', (_, res) => res.json({ service: 'WhatsApp Agenda API', version: '2.0', status: 'online' }));
 

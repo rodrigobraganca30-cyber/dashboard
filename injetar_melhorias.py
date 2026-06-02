@@ -144,6 +144,66 @@ if count_func >= 2:
 else:
     log("OK [5] Sem JS duplicado")
 
+# 6. FIX WA-TABS CLICÁVEIS (z-index + pointer-events + listener backup)
+OLD_TAB_CSS = ".wa-tabs{display:flex;gap:8px;margin-bottom:24px}\n.wa-tab{background:#111520;border:1px solid #1c2237;border-radius:8px;padding:10px 20px;font-size:13px;color:#94a3b8;cursor:pointer;font-family:var(--font-head);font-weight:600;transition:all .2s}"
+NEW_TAB_CSS = ".wa-tabs{display:flex;gap:8px;margin-bottom:24px;position:relative;z-index:50}\n.wa-tab{background:#111520;border:1px solid #1c2237;border-radius:8px;padding:10px 20px;font-size:13px;color:#94a3b8;cursor:pointer;font-family:var(--font-head);font-weight:600;transition:all .2s;position:relative;z-index:51;pointer-events:all;user-select:none}"
+OLD_CHAT_CSS = "body.chat-mode .wa-tabs{flex-shrink:0;padding:8px 16px;margin-bottom:0}"
+NEW_CHAT_CSS = "body.chat-mode .wa-tabs{flex-shrink:0;padding:8px 16px;margin-bottom:0;pointer-events:all;z-index:50}"
+BACKUP_LISTENER = """
+  // Backup listeners para wa-tabs (garante funcionamento mesmo com z-index issues)
+  document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('.wa-tab').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var onclick = btn.getAttribute('onclick');
+        if (onclick) {
+          var match = onclick.match(/showWaSub\\('([^']+)'/);
+          if (match) showWaSub(match[1], btn);
+        }
+      }, true); // capture phase
+    });
+  });
+"""
+ANCHOR_JS = "  var waDispMode='fixed';"
+
+tab_changes = 0
+if OLD_TAB_CSS in html:
+    html = html.replace(OLD_TAB_CSS, NEW_TAB_CSS, 1)
+    tab_changes += 1
+elif NEW_TAB_CSS not in html:
+    # Tenta só o wa-tabs
+    OLD2 = ".wa-tabs{display:flex;gap:8px;margin-bottom:24px}"
+    NEW2 = ".wa-tabs{display:flex;gap:8px;margin-bottom:24px;position:relative;z-index:50}"
+    if OLD2 in html and NEW2 not in html:
+        html = html.replace(OLD2, NEW2, 1)
+        tab_changes += 1
+
+if OLD_CHAT_CSS in html:
+    html = html.replace(OLD_CHAT_CSS, NEW_CHAT_CSS, 1)
+    tab_changes += 1
+
+if ANCHOR_JS in html and BACKUP_LISTENER not in html:
+    html = html.replace(ANCHOR_JS, BACKUP_LISTENER + "\n  " + "var waDispMode='fixed';", 1)
+    tab_changes += 1
+
+if tab_changes > 0:
+    changes += tab_changes
+    log(f"OK [6] wa-tab fix aplicado ({tab_changes} partes)")
+else:
+    log("OK [6] wa-tab fix ja existe")
+
+# 7. FIX JS QUOTES - garante que aspas em onclick inline nao quebrem o bloco <script>
+BAD_QUOTES = "waFluxoCancelar('' + fl.id + '')"
+GOOD_QUOTES = "waFluxoCancelar(\\x27' + fl.id + '\\x27)"
+if BAD_QUOTES in html:
+    html = html.replace(BAD_QUOTES, GOOD_QUOTES)
+    log("OK [7] Fix JS quotes: waFluxoCancelar corrigido")
+    changes += 1
+elif GOOD_QUOTES in html:
+    log("OK [7] Fix JS quotes ja aplicado")
+else:
+    log("OK [7] Fix JS quotes (nenhum problema detectado)")
+
 # SALVAR
 if changes > 0:
     with open(DASH, "w", encoding="utf-8") as f:
@@ -151,3 +211,4 @@ if changes > 0:
     log(f"PRONTO: {changes} melhoria(s) | {os.path.getsize(DASH):,} bytes")
 else:
     log("Dashboard ja atualizado - nenhuma alteracao necessaria")
+

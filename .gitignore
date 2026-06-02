@@ -25,3 +25,12 @@ backup_*/
 dashboard_svoboda_atualizado.html
 dashboard_index_backup.html
 *.pdf
+
+*.xlsx
+*.csv
+BACKUPS/
+data/
+scratch/
+*.bak*
+*.log
+__pycache__/

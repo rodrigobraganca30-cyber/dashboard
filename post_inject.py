@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, shutil, datetime, sys
+import os, shutil, datetime, sys, re
 
 DASH = "/docker/dashboard/html/index.html"
 
@@ -30,16 +30,24 @@ def inject_login_guard(html):
 
 # 2. BOTOES ADMIN
 def inject_admin_buttons(html):
+    # Cleanup: remover bloco TF_ADMIN_BTNS do injetar_admin_btn.py (previne duplicacao)
+    if '<!-- TF_ADMIN_BTNS -->' in html:
+        tf_start = html.find('<!-- TF_ADMIN_BTNS -->')
+        # O bloco TF_ADMIN_BTNS termina no </script> logo apos (script do tf-user-label)
+        tf_script_end = html.find('</script>', tf_start)
+        if tf_script_end != -1:
+            tf_end = tf_script_end + len('</script>')
+            # Pula newlines apos </script>
+            while tf_end < len(html) and html[tf_end] in '\r\n':
+                tf_end += 1
+            html = html[:tf_start] + html[tf_end:]
+            log("[2] Cleanup: bloco TF_ADMIN_BTNS removido (duplicacao do injetar_admin_btn.py)")
+
     if "btn-logout-dash" in html:
         log("[2] Botoes admin OK"); return html
     
-    target = (
-        '  <div class="header-date">\n'
-        '    <span class="live-dot"></span>\n'
-        '    <span id="current-date">CARREGANDO...</span>\n'
-        '  </div>\n'
-        '</div>'
-    )
+    # Match header-date div with or without style="display:none;"
+    pattern = r'(  <div class="header-date"(?:\s+style="[^"]*")?>\s*\n    <span class="live-dot"></span>\s*\n    <span id="current-date">CARREGANDO\.\.\.</span>\s*\n  </div>\s*\n</div>)'
     
     btns = (
         '  <div class="header-date" style="display:none;">\n'
@@ -78,8 +86,9 @@ def inject_admin_buttons(html):
         '</script>'
     )
     
-    if target in html:
-        html = html.replace(target, btns, 1)
+    m = re.search(pattern, html)
+    if m:
+        html = html[:m.start()] + btns + html[m.end():]
         log("[2] Botoes admin INJETADOS no Header")
     else:
         log("[2] AVISO: nao encontrou ancora do header-date para injecao no Header")
@@ -139,6 +148,34 @@ def inject_cancelado_filter(html):
     new = '<option value="cancelamento-do-contrato">Cancelado</option>' + old
     if old in html:
         html = html.replace(old, new, 1); log("[6] Filtro Cancelado INJETADO")
+    return html
+
+# 6B. SHOWPAGE FUNCTION (garante que sempre existe)
+def inject_showpage(html):
+    if "function showPage(" in html:
+        log("[6B] showPage OK"); return html
+    showpage_js = (
+        '<script>/* showPage - navegacao de abas */\n'
+        'function showPage(id, btn) {\n'
+        '  document.querySelectorAll(\'.page\').forEach(function(p){ p.classList.remove(\'active\'); p.style.display=\'none\'; });\n'
+        '  document.querySelectorAll(\'.nav-btn\').forEach(function(b){ b.classList.remove(\'active\'); });\n'
+        '  var el = document.getElementById(id);\n'
+        '  if(el){ el.classList.add(\'active\'); el.style.display=\'block\'; }\n'
+        '  if(btn) btn.classList.add(\'active\');\n'
+        '}\n'
+        '/* inicializa: mostra apenas visao-geral */\n'
+        'document.addEventListener(\'DOMContentLoaded\', function(){\n'
+        '  document.querySelectorAll(\'.page\').forEach(function(p){ p.style.display=\'none\'; });\n'
+        '  var vg = document.getElementById(\'visao-geral\');\n'
+        '  if(vg){ vg.style.display=\'block\'; vg.classList.add(\'active\'); }\n'
+        '});\n'
+        '</script>'
+    )
+    if '</body>' in html:
+        html = html.replace('</body>', showpage_js + '\n</body>', 1)
+        log("[6B] showPage INJETADO")
+    else:
+        log("[6B] AVISO: </body> nao encontrado")
     return html
 
 # 7. DROPDOWN MANUAL COMPLETO
@@ -301,6 +338,19 @@ window.showPage=function(p,b){if(_osp)_osp(p,b);if(p==="estoque"&&!Object.keys(_
     log("[8] Aba Estoque INJETADA")
     return new_html
 
+# 9. FIX JS QUOTES (garante que aspas em onclick inline não quebrem o JS)
+def fix_js_quotes(html):
+    # waFluxoCancelar('' + fl.id + '') → waFluxoCancelar(\x27' + fl.id + '\x27)
+    bad = "waFluxoCancelar('' + fl.id + '')"
+    good = "waFluxoCancelar(\\x27' + fl.id + '\\x27)"
+    if bad in html:
+        html = html.replace(bad, good)
+        log("[9] Fix JS quotes: waFluxoCancelar CORRIGIDO")
+    else:
+        log("[9] Fix JS quotes OK (sem problemas detectados)")
+    return html
+
+
 # MAIN
 if __name__ == "__main__":
     print("=" * 50)
@@ -316,8 +366,11 @@ if __name__ == "__main__":
     html = inject_intervalo_label(html)
     html = inject_intervalo_preview(html)
     html = inject_cancelado_filter(html)
+    html = inject_showpage(html)
     html = inject_full_dropdown(html)
     html = inject_estoque(html)
+    html = fix_js_quotes(html)
     save(DASH, html)
     print("")
     print("[DONE] Concluido! Tamanho:", os.path.getsize(DASH), "bytes")
+

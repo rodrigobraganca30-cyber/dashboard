@@ -1,13 +1,18 @@
 import openpyxl
 import glob
 import os
+import sys
 import json
 import unicodedata
 from datetime import datetime
 from collections import Counter
 
 # --- CONFIGURAÇÕES ---
-PASTA = r"C:\Users\SVOBODA\Desktop\DASHBOARD"
+# Auto-detect: Linux (VPS) ou Windows (local)
+if sys.platform.startswith('linux'):
+    PASTA = "/docker/dashboard"
+else:
+    PASTA = r"C:\Users\SVOBODA\Desktop\DASHBOARD"
 HTML_SRC = os.path.join(PASTA, "dashboard_svoboda_template.html")
 HTML_OUT = os.path.join(PASTA, "dashboard_svoboda_atualizado.html")
 
@@ -133,7 +138,19 @@ for row in rows[1:]:
     data_key = "--"
     if data_raw:
         try:
-            dt_obj = data_raw if not isinstance(data_raw, str) else datetime.strptime(str(data_raw)[:10], "%Y-%m-%d")
+            if isinstance(data_raw, str):
+                _ds = str(data_raw).strip()
+                dt_obj = None
+                for _fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y"):
+                    try:
+                        dt_obj = datetime.strptime(_ds[:10], _fmt)
+                        break
+                    except ValueError:
+                        continue
+                if dt_obj is None:
+                    raise ValueError(f"Formato de data desconhecido: {_ds}")
+            else:
+                dt_obj = data_raw
             data_key = dt_obj.strftime("%d/%m")
         except: pass
 
@@ -227,8 +244,14 @@ v_melhor = sorted(list_diag, key=lambda x: x["taxa"], reverse=True)[0] if list_d
 v_pior = sorted(list_diag, key=lambda x: x["taxa"])[0] if list_diag else {"data": "-", "taxa": 0}
 v_media = total_os / len(list_diag) if list_diag else 0
 
+# --- 2a-extra. AGENDA FUTURA ---
+# A aba Agenda Futura é gerenciada exclusivamente pelo servidor (injetar_agenda_futura.py)
+# Aqui só inserimos um placeholder com marcadores BEGIN/END para o robô preencher.
+print("[OK] Agenda Futura: gerenciada pelo servidor (injetar_agenda_futura.py)")
+
 # --- 2b. DOWNLOAD E LEITURA DA PLANILHA DE FROTA ---
 FROTA_FILE = os.path.join(PASTA, "frota_temp.xlsx")
+
 FROTA_SHEET_ID = "1CjWOfMTQQ1aP3jeF-Wf3gxIa5DT0qMRwjijD6nXXtQg"
 FROTA_URL = f"https://docs.google.com/spreadsheets/d/{FROTA_SHEET_ID}/export?format=xlsx"
 
@@ -1717,8 +1740,19 @@ estoque_page_html += """
 </div>
 """
 
+# ── PLACEHOLDER AGENDA FUTURA (conteúdo injetado pelo servidor) ──────────────
+agenda_futura_page_html = """<!-- BEGIN AGENDA FUTURA -->
+<!-- Seção gerenciada pelo injetar_agenda_futura.py no servidor -->
+<div class="page" id="agenda-futura">
+  <div style="text-align:center;padding:80px 20px;color:#6b7280;font-size:14px;">
+    ⏳ Dados da Agenda Futura serão preenchidos automaticamente pelo robô do servidor.
+  </div>
+</div>
+<!-- END AGENDA FUTURA -->"""
+
 # INJEÇÃO DAS PÁGINAS (antes do footer)
-html = html.replace('<div class="footer">', frota_page_html + indicadores_page_html + indicador_giga_page_html + whatsapp_agenda_page_html + monitor_tv_page_html + estoque_page_html + '<div class="footer">') 
+html = html.replace('<div class="footer">', frota_page_html + indicadores_page_html + indicador_giga_page_html + whatsapp_agenda_page_html + monitor_tv_page_html + estoque_page_html + agenda_futura_page_html + '<div class="footer">') 
+
 
 # ESTILO DA BARRA DE FILTROS (PREMIUM)
 extra_css = """
@@ -1779,6 +1813,9 @@ top_struct = f"""
       <div class="filter-item" onclick="toggleFiltro('city',this)"><i class="fas fa-globe-americas"></i> <span>Todas Cidades</span> <i class="fas fa-chevron-down"></i><div class="filter-dropdown" id="drop-city"></div></div>
       <div class="filter-item" onclick="toggleFiltro('tec',this)"><i class="fas fa-user-circle"></i> <span>Todos Técnicos</span> <i class="fas fa-chevron-down"></i><div class="filter-dropdown" id="drop-tec"></div></div>
       <div class="filter-item" onclick="toggleFiltro('type',this)"><i class="fas fa-tools"></i> <span>Todos Serviços</span> <i class="fas fa-chevron-down"></i><div class="filter-dropdown" id="drop-type"></div></div>
+      <a href="/historico_os.xlsx" download class="filter-item" style="text-decoration:none;cursor:pointer;border-color:#4caf50;margin-left:auto;" title="Baixar planilha completa de O.S.">
+        <i class="fas fa-file-excel" style="color:#4caf50"></i> <span>Exportar XLSX</span>
+      </a>
     </div>
     <div class="header-date">{data_header}</div>
   </div>
@@ -1952,8 +1989,10 @@ function runFilter() {
     if(ds || de) {
       var parts = d.date.split('/');
       if(parts.length===2) {
+        var dd = parts[0].length===1 ? '0'+parts[0] : parts[0];
+        var mm = parts[1].length===1 ? '0'+parts[1] : parts[1];
         var yr = new Date().getFullYear();
-        var dISO = yr + '-' + parts[1] + '-' + parts[0];
+        var dISO = yr + '-' + mm + '-' + dd;
         if(ds && dISO < ds) dateOk = false;
         if(de && dISO > de) dateOk = false;
       }
@@ -2074,7 +2113,48 @@ document.addEventListener('click', function(e) {
   if(!e.target.closest('.filter-item')) document.querySelectorAll('.filter-dropdown').forEach(function(d){d.classList.remove('show');});
 });
 """
-html = html.replace('</script>', js_data + js_logic + '</script>')
+# IMPORTANTE: usar rfind para substituir a ÚLTIMA ocorrência de </script>
+# (a primeira é do Chart.js externo, que NÃO pode conter código inline)
+_last_close = html.rfind('</script>')
+if _last_close != -1:
+    html = html[:_last_close] + js_data + js_logic + '</script>' + html[_last_close + len('</script>'):]
+
+# ═══════════════════════════════════════════════════════════════
+# BLINDAGEM: Validação de integridade do HTML antes de salvar
+# ═══════════════════════════════════════════════════════════════
+def validar_html(html_content):
+    erros = []
+    # 1. Verificar que rawOSData existe
+    if 'var rawOSData' not in html_content:
+        erros.append("rawOSData não encontrado")
+    # 2. Verificar que filterLists existe
+    if 'var filterLists' not in html_content:
+        erros.append("filterLists não encontrado")
+    # 3. Tags script externas não devem ter JS inline
+    import re as _re
+    for m in _re.finditer(r'<script\s+src=[^>]+>(.*?)</script>', html_content, _re.DOTALL):
+        inner = m.group(1).strip()
+        if inner and ('var ' in inner or 'function ' in inner):
+            erros.append(f"JS inline dentro de script externo: {inner[:60]}")
+    # 4. Divs de navegação WA devem existir
+    for div_id in ['wa-painel', 'wa-disparo', 'wa-chat', 'wa-config']:
+        if f'id="{div_id}"' not in html_content:
+            erros.append(f"div #{div_id} ausente")
+    # 5. Tamanho mínimo
+    if len(html_content) < 2_000_000:
+        erros.append(f"HTML muito pequeno ({len(html_content):,} bytes)")
+    return erros
+
+_erros = validar_html(html)
+if _erros:
+    print("\n" + "=" * 60)
+    print("[ERRO FATAL] Validação do HTML FALHOU! Não será salvo.")
+    for _e in _erros:
+        print(f"  [X] {_e}")
+    print("=" * 60)
+    exit(1)
+else:
+    print("[BLINDAGEM] Validacao HTML OK [OK]")
 
 with open(HTML_OUT, "w", encoding="utf-8") as f: f.write(html)
 
@@ -2091,6 +2171,17 @@ def fazer_upload():
         pkey = paramiko.RSAKey.from_private_key_file(ssh_key_path)
         
         client.connect(cfg['HOST'], port=int(cfg['PORT']), username=cfg['USER'], pkey=pkey)
+
+        # ═══ BLINDAGEM: Backup automático no servidor antes do upload ═══
+        try:
+            _remote_html = os.path.join(cfg['REMOTE_DIR'], "index.html").replace("\\","/")
+            _bak_name = f"{_remote_html}.bak.pre_deploy_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            stdin, stdout, stderr = client.exec_command(f"cp {_remote_html} {_bak_name}")
+            stdout.read()  # esperar completar
+            print(f"[BLINDAGEM] Backup pré-deploy: {os.path.basename(_bak_name)} ✓")
+        except Exception as _bak_err:
+            print(f"[AVISO] Backup pré-deploy falhou: {_bak_err}")
+
         sftp = client.open_sftp(); sftp.put(HTML_OUT, os.path.join(cfg['REMOTE_DIR'], "index.html").replace("\\","/"))
         
         # --- UPLOAD DOS INVENTÁRIOS ---
@@ -2110,6 +2201,22 @@ def fazer_upload():
             except IOError:
                 print(f"[SFTP] Enviando novo inventario: {nome_arq}")
                 sftp.put(inv, remote_path)
+        
+        # --- UPLOAD DOS DADOS JSON (Fase 1 - dinamizacao) ---
+        data_dir_local = os.path.join(PASTA, "data")
+        if os.path.isdir(data_dir_local):
+            remote_data_dir = os.path.join(cfg['REMOTE_DIR'], "data").replace("\\","/")
+            try:
+                sftp.stat(remote_data_dir)
+            except IOError:
+                sftp.mkdir(remote_data_dir)
+            json_files = glob.glob(os.path.join(data_dir_local, "*.json"))
+            for jf in json_files:
+                nome_json = os.path.basename(jf)
+                remote_json = remote_data_dir + "/" + nome_json
+                sftp.put(jf, remote_json)
+                print(f"[SFTP] JSON: {nome_json}")
+            print(f"[OK] {len(json_files)} JSONs enviados para {remote_data_dir}")
                 
         sftp.close(); client.close(); print("[SUCESSO] Dashboard Restaurado 100%!")
         
@@ -2121,7 +2228,7 @@ def fazer_upload():
         try:
             client2 = paramiko.SSHClient(); client2.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             client2.connect(cfg['HOST'], port=int(cfg['PORT']), username=cfg['USER'], pkey=pkey)
-            cmd = "cd /docker/dashboard && python3 injetar_auth.py 2>&1 && python3 injetar_admin_btn.py 2>&1 && python3 injetar_templates.py 2>&1 && python3 inject_estoque.py 2>&1 && python3 injetar_melhorias.py 2>&1"
+            cmd = "cd /docker/dashboard && python3 injetar_auth.py 2>&1 && python3 post_inject.py 2>&1 && python3 injetar_templates.py 2>&1 && python3 inject_estoque.py 2>&1 && python3 injetar_melhorias.py 2>&1 && python3 injetar_agenda_futura.py 2>&1"
             stdin, stdout, stderr = client2.exec_command(cmd, timeout=120)
             out = stdout.read().decode('utf-8', errors='replace')
             print(out)
@@ -2132,5 +2239,19 @@ def fazer_upload():
             print("         Os injects serao aplicados automaticamente as 22h pelo servidor.")
         
     except Exception as e: print(f"[ERRO] {e}")
+
+# --- GERAR JSONS PARA DINAMIZACAO (Fase 1) ---
+try:
+    import subprocess
+    proc_script = os.path.join(PASTA, "processar_dados.py")
+    if os.path.exists(proc_script):
+        print("\n[...] Gerando JSONs (processar_dados.py)...")
+        result = subprocess.run([sys.executable, proc_script], capture_output=True, text=True, timeout=120)
+        if result.returncode == 0:
+            print("[OK] JSONs gerados com sucesso!")
+        else:
+            print(f"[AVISO] processar_dados.py retornou erro (nao critico): {result.stderr[:200]}")
+except Exception as e:
+    print(f"[AVISO] Nao foi possivel gerar JSONs (nao critico): {e}")
 
 fazer_upload()

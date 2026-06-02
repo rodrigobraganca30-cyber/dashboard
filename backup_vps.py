@@ -1,56 +1,57 @@
-import json
-import paramiko
-import os
-import time
+"""
+backup_vps.py - Backup completo dos arquivos críticos do VPS
+"""
+import paramiko, os, sys, datetime
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
-def backup_vps():
-    config_path = r"C:\Users\SVOBODA\Desktop\DASHBOARD\config_servidor.json"
-    with open(config_path, "r") as f:
-        config = json.load(f)
-        
-    host = config["HOST"]
-    port = config["PORT"]
-    user = config["USER"]
-    password = config["PASS"]
-    remote_dir = config["REMOTE_DIR"]
-    
-    print(f"Conectando a {host}...")
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    
+ssh_key = os.path.join(os.environ['USERPROFILE'], '.ssh', 'id_rsa')
+pkey = paramiko.RSAKey.from_private_key_file(ssh_key)
+client = paramiko.SSHClient()
+client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+client.connect('187.77.240.87', port=22, username='root', pkey=pkey)
+
+ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+
+# 1. Backup do /opt/painel_robo (robô oracle + gerar_tv_os)
+print('[...] Fazendo backup de /opt/painel_robo ...')
+stdin, stdout, stderr = client.exec_command(
+    f'tar -czf /root/backup_painel_robo_{ts}.tar.gz /opt/painel_robo/ 2>&1 && echo OK'
+)
+out = stdout.read().decode('utf-8', errors='replace')
+print(f'  painel_robo: {out.strip()}')
+
+# 2. Backup do /docker/dashboard (scripts Python + HTML gerado)
+print('[...] Fazendo backup de /docker/dashboard ...')
+stdin, stdout, stderr = client.exec_command(
+    f'tar -czf /root/backup_docker_dashboard_{ts}.tar.gz /docker/dashboard/ 2>&1 && echo OK'
+)
+out = stdout.read().decode('utf-8', errors='replace')
+print(f'  docker/dashboard: {out.strip()}')
+
+# 3. Lista os backups criados no VPS
+print('\n[...] Backups no VPS (/root/):')
+stdin, stdout, stderr = client.exec_command('ls -lh /root/backup_*.tar.gz 2>/dev/null')
+print(stdout.read().decode('utf-8', errors='replace'))
+
+# 4. Baixa os backups para o PC local
+print('[...] Baixando backups para o PC...')
+sftp = client.open_sftp()
+
+backup_dir = r'C:\Users\SVOBODA\Desktop\BACKUPS_VPS'
+os.makedirs(backup_dir, exist_ok=True)
+
+for nome in [f'backup_painel_robo_{ts}.tar.gz', f'backup_docker_dashboard_{ts}.tar.gz']:
+    remote = f'/root/{nome}'
+    local  = os.path.join(backup_dir, nome)
     try:
-        client.connect(host, port=port, username=user, password=password)
-        print("Conectado com sucesso!")
-        
-        # O diretório no config é /docker/dashboard/html
-        parent_dir = os.path.dirname(remote_dir)
-        base_name = os.path.basename(remote_dir)
-        
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        remote_tar = f"/tmp/dashboard_backup_{timestamp}.tar.gz"
-        local_tar = rf"C:\Users\SVOBODA\Desktop\VPS_DASHBOARD_backup_{timestamp}.tar.gz"
-        
-        print(f"Compactando {remote_dir} no servidor para {remote_tar}...")
-        cmd = f"tar -czf {remote_tar} -C {parent_dir} {base_name}"
-        stdin, stdout, stderr = client.exec_command(cmd)
-        exit_status = stdout.channel.recv_exit_status()
-        
-        if exit_status == 0:
-            print("Compactação concluída. Baixando arquivo...")
-            sftp = client.open_sftp()
-            sftp.get(remote_tar, local_tar)
-            sftp.close()
-            print(f"Download concluído! Salvo em: {local_tar}")
-            
-            # Limpa o arquivo no servidor
-            client.exec_command(f"rm {remote_tar}")
-        else:
-            print(f"Erro ao compactar: {stderr.read().decode('utf-8')}")
-            
+        sftp.get(remote, local)
+        size = os.path.getsize(local) / (1024*1024)
+        print(f'  [OK] {nome} -> {size:.1f} MB')
     except Exception as e:
-        print(f"Erro na conexão: {e}")
-    finally:
-        client.close()
+        print(f'  [ERRO] {nome}: {e}')
 
-if __name__ == '__main__':
-    backup_vps()
+sftp.close()
+client.close()
+
+print(f'\n[CONCLUIDO] Backups salvos em: {backup_dir}')
+print(f'  Timestamp: {ts}')

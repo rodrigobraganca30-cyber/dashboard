@@ -1,0 +1,1231 @@
+require('dotenv').config();
+const express = require('express');
+const axios   = require('axios');
+const cors    = require('cors');
+const { createClient } = require('redis');
+const path    = require('path');
+
+const app  = express();
+app.use(cors());
+app.use(express.json());
+
+// ──────────────────────────────────────────────
+// SERVE FRONTEND STATIC (index.html)
+// ──────────────────────────────────────────────
+app.use(express.static(path.join(__dirname, '..', 'frontend')));
+
+// ──────────────────────────────────────────────
+// AUTH MIDDLEWARE — API Key
+// ──────────────────────────────────────────────
+const API_KEY = process.env.AGENDA_API_KEY || 'svoboda-agenda-2025';
+function authMiddleware(req, res, next) {
+  // Skip auth for health, webhook, static files, and frontend requests (same-origin)
+  if (req.path === '/health' || req.path === '/webhook' || req.path === '/' || req.path.endsWith('.html') || req.path.endsWith('.js') || req.path.endsWith('.css') || req.path.endsWith('.ico') || req.headers.referer) {
+    return next();
+  }
+  const key = req.headers['x-api-key'] || req.query.apikey;
+  if (key === API_KEY) return next();
+  res.status(401).json({ error: 'API Key inválida' });
+}
+app.use(authMiddleware);
+
+// ──────────────────────────────────────────────
+// RATE LIMITING (simple in-memory)
+// ──────────────────────────────────────────────
+const rateLimits = {};
+const RATE_WINDOW = 60000; // 1 minute
+const RATE_MAX_SEND = 20;  // max 20 sends per minute
+
+function checkRateLimit(key, max = RATE_MAX_SEND) {
+  const now = Date.now();
+  if (!rateLimits[key]) rateLimits[key] = [];
+  rateLimits[key] = rateLimits[key].filter(t => now - t < RATE_WINDOW);
+  if (rateLimits[key].length >= max) return false;
+  rateLimits[key].push(now);
+  return true;
+}
+
+// ──────────────────────────────────────────────
+// STRUCTURED LOGGING
+// ──────────────────────────────────────────────
+function log(level, msg, data = {}) {
+  const entry = {
+    ts: new Date().toISOString(),
+    level,
+    msg,
+    ...data
+  };
+  console.log(JSON.stringify(entry));
+}
+
+// ──────────────────────────────────────────────
+// REDIS
+// ──────────────────────────────────────────────
+const redis = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
+redis.connect().then(() => log('info', 'Redis conectado'));
+redis.on('error', e => log('error', 'Redis error', { error: e.message }));
+
+// Helpers Redis
+const KEY_STATUS   = (id) => `agenda:status:${id}`;
+const KEY_MSGS     = (phone) => `agenda:msgs:${phone}`;
+const KEY_PHONE_ID = (phone) => `agenda:phone2id:${phone}`;
+const KEY_TEMPLATES = 'agenda:templates';
+const KEY_CAMPAIGNS = 'agenda:campaigns';
+const KEY_UNREAD   = (phone) => `agenda:unread:${phone}`;
+const KEY_BLACKLIST = 'agenda:blacklist';
+
+// ── BLACKLIST: Validação de telefone ──
+function validateAndCleanPhone(raw) {
+  if (!raw) return { valid: false, number: '', reason: 'vazio' };
+  const cleaned = String(raw).replace(/\D/g, '');
+  if (cleaned.length < 10) return { valid: false, number: cleaned, reason: 'curto' };
+  if (cleaned.length > 13) return { valid: false, number: cleaned, reason: 'longo' };
+  let number = cleaned;
+  if (!number.startsWith('55')) number = '55' + number;
+  // Aceita 12 dígitos (sem 9° dígito) ou 13 dígitos (com 9° dígito)
+  if (number.length < 12 || number.length > 13) return { valid: false, number, reason: 'len inválido' };
+  return { valid: true, number };
+}
+
+// ── Helper: gera variação com/sem 9° dígito ──
+// Ex: 5554996676748 (com 9) → 555496676748 (sem 9) e vice-versa
+function getPhoneVariant(phone) {
+  const clean = String(phone).replace(/\D/g, '');
+  if (!clean.startsWith('55') || clean.length < 12) return null;
+  const ddd = clean.substring(2, 4);
+  const rest = clean.substring(4);
+  if (clean.length === 13 && rest.length === 9 && rest.startsWith('9')) {
+    // Tem 9° dígito → gera versão sem
+    return '55' + ddd + rest.substring(1);
+  } else if (clean.length === 12 && rest.length === 8) {
+    // Sem 9° dígito → gera versão com
+    return '55' + ddd + '9' + rest;
+  }
+  return null;
+}
+
+async function setStatus(clientId, status, obs = '') {
+  await redis.set(KEY_STATUS(clientId), JSON.stringify({ status, obs, updatedAt: new Date().toISOString() }));
+}
+
+async function getStatus(clientId) {
+  const v = await redis.get(KEY_STATUS(clientId));
+  return v ? JSON.parse(v) : { status: 'pendente', obs: '', updatedAt: null };
+}
+
+async function appendMsg(phone, msg) {
+  const raw = await redis.get(KEY_MSGS(phone));
+  const msgs = raw ? JSON.parse(raw) : [];
+  
+  // Evitar duplicação: se a última mensagem for idêntica (mesmo remetente e texto) e muito recente
+  if (msgs.length > 0) {
+    const lastMsg = msgs[msgs.length - 1];
+    if (lastMsg.from === msg.from && lastMsg.text === msg.text) {
+      if (Math.abs(lastMsg.ts - msg.ts) < 10000) return; // ignora duplicata de 10 seg
+    }
+  }
+
+  msgs.push(msg);
+  // mantém últimas 200 mensagens
+  if (msgs.length > 200) msgs.splice(0, msgs.length - 200);
+  await redis.set(KEY_MSGS(phone), JSON.stringify(msgs));
+}
+
+async function getMsgs(phone) {
+  const raw = await redis.get(KEY_MSGS(phone));
+  const msgs = raw ? JSON.parse(raw) : [];
+  // ── Unificação: busca mensagens da variação com/sem 9° dígito ──
+  const variant = getPhoneVariant(phone);
+  if (variant) {
+    const rawV = await redis.get(KEY_MSGS(variant));
+    if (rawV) {
+      const msgsV = JSON.parse(rawV);
+      // Mescla e ordena por timestamp, removendo duplicatas
+      const merged = [...msgs, ...msgsV];
+      merged.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+      // Remove duplicatas (mesmo from + text + ts próximo)
+      const deduped = [];
+      for (const m of merged) {
+        const isDup = deduped.some(d => d.from === m.from && d.text === m.text && Math.abs((d.ts || 0) - (m.ts || 0)) < 5000);
+        if (!isDup) deduped.push(m);
+      }
+      return deduped;
+    }
+  }
+  return msgs;
+}
+
+// ──────────────────────────────────────────────
+// META CLOUD API CLIENT
+// ──────────────────────────────────────────────
+const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'svoboda-webhook-2025';
+
+async function getMetaConfig() {
+  const token = await redis.get('agenda:meta_token') || process.env.META_ACCESS_TOKEN;
+  const phoneId = await redis.get('agenda:meta_phone_id') || process.env.META_PHONE_ID;
+  return { token, phoneId };
+}
+
+function getMetaClient(token) {
+  return axios.create({
+    headers: { 
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    timeout: 15000
+  });
+}
+
+async function withRetry(fn, retries = 3, delayMs = 2000) {
+  for (let i = 0; i < retries; i++) {
+    try { return await fn(); } 
+    catch (e) {
+      if (i === retries - 1) throw e;
+      log('warn', `Retry ${i + 1}/${retries}`, { error: e.message });
+      await new Promise(r => setTimeout(r, delayMs * (i + 1)));
+    }
+  }
+}
+
+function extractTemplateParams(templateText, clientData, remetente) {
+  const matches = [...templateText.matchAll(/\{\{([^}]+)\}\}/g)];
+  const parameters = [];
+
+  // Mapeamento numérico: {{1}}→nome, {{2}}→data, {{3}}→cidade, etc.
+  const numericFields = [
+    clientData.nome || '',
+    clientData.data || '',
+    clientData.cidade || '',
+    clientData.horario || '',
+    clientData.endereco || '',
+    clientData.tipo || '',
+    remetente || ''
+  ];
+
+  for (const match of matches) {
+    const varName = match[1].toLowerCase().trim();
+    let textValue = '';
+
+    // Variáveis numéricas: {{1}}, {{2}}, {{3}}...
+    const numIdx = parseInt(varName);
+    if (!isNaN(numIdx) && numIdx >= 1 && numIdx <= numericFields.length) {
+      textValue = numericFields[numIdx - 1];
+    }
+    // Variáveis nomeadas: {{nome}}, {{data}}, etc.
+    else if (varName === 'nome') textValue = clientData.nome || '';
+    else if (varName === 'data') textValue = clientData.data || '';
+    else if (varName === 'cidade') textValue = clientData.cidade || '';
+    else if (varName === 'horario') textValue = clientData.horario || '';
+    else if (varName === 'endereco') textValue = clientData.endereco || '';
+    else if (varName === 'tipo') textValue = clientData.tipo || '';
+    else if (varName === 'remetente') textValue = remetente || '';
+
+    parameters.push({ type: "text", text: textValue || ' ' });
+  }
+  return parameters;
+}
+
+// Envio de Template
+async function sendTemplate(phone, templateName, components, lang = 'pt_BR') {
+  const conf = await getMetaConfig();
+  if (!conf.token || !conf.phoneId) {
+    throw new Error('Meta API credentials missing. Check your Dashboard configs.');
+  }
+  const META_API_URL = `https://graph.facebook.com/v19.0/${conf.phoneId}/messages`;
+  const meta = getMetaClient(conf.token);
+
+  let number = phone.replace(/\D/g, '');
+  if (!number.startsWith('55')) number = '55' + number;
+
+  const payload = {
+    messaging_product: "whatsapp",
+    to: number,
+    type: "template",
+    template: {
+      name: templateName,
+      language: { code: lang },
+      components: components
+    }
+  };
+
+  const res = await withRetry(() => meta.post(META_API_URL, payload));
+  log('info', 'Template enviado (Meta API)', { phone: number, template: templateName, lang });
+  return res.data;
+}
+
+// Envio de Texto Livre (apenas se houver janela 24h aberta)
+async function sendText(phone, text) {
+  const conf = await getMetaConfig();
+  if (!conf.token || !conf.phoneId) {
+    throw new Error('Meta API credentials missing. Check your Dashboard configs.');
+  }
+  const META_API_URL = `https://graph.facebook.com/v19.0/${conf.phoneId}/messages`;
+  const meta = getMetaClient(conf.token);
+
+  let number = phone.replace(/\D/g, '');
+  if (!number.startsWith('55')) number = '55' + number;
+
+  const payload = {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: number,
+    type: "text",
+    text: { preview_url: false, body: text }
+  };
+
+  const res = await withRetry(() => meta.post(META_API_URL, payload));
+  log('info', 'Mensagem enviada (Meta API)', { phone: number });
+  return res.data;
+}
+
+// ──────────────────────────────────────────────
+// META API MANAGEMENT (Stubs para frontend)
+// ──────────────────────────────────────────────
+app.get('/wa/status', async (req, res) => {
+  res.json({ instance: { state: "open", status: "Meta API Oficial conectada" } });
+});
+
+app.get('/wa/qr', async (req, res) => {
+  res.json({ error: "API Oficial não requer QR Code. Use o painel da Meta." });
+});
+
+app.delete('/wa/logout', async (req, res) => res.json({ ok: true }));
+app.post('/wa/logout', async (req, res) => {
+  await redis.del('agenda:meta_token');
+  await redis.del('agenda:meta_phone_id');
+  res.json({ ok: true });
+});
+
+app.get('/wa/instances', async (req, res) => {
+  const conf = await getMetaConfig();
+  if (conf.token && conf.phoneId) {
+    res.json(['Meta_API_Oficial']);
+  } else {
+    res.json([]);
+  }
+});
+
+// Endpoint para salvar as credenciais da Meta via Painel
+app.post('/meta-config', async (req, res) => {
+  try {
+    const { token, phoneId, wabaId } = req.body;
+    if (token) await redis.set('agenda:meta_token', token);
+    if (phoneId) await redis.set('agenda:meta_phone_id', phoneId);
+    if (wabaId) await redis.set('agenda:meta_waba_id', wabaId);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /meta-config — retorna credenciais salvas (mascaradas)
+app.get('/meta-config', async (req, res) => {
+  try {
+    const token = await redis.get('agenda:meta_token') || '';
+    const phoneId = await redis.get('agenda:meta_phone_id') || '';
+    const wabaId = await redis.get('agenda:meta_waba_id') || '';
+    res.json({
+      token: token ? '***' + token.slice(-8) : '',
+      phoneId,
+      wabaId,
+      configured: !!(token && phoneId && wabaId)
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ──────────────────────────────────────────────
+// META TEMPLATE MANAGEMENT (Graph API)
+// ──────────────────────────────────────────────
+
+// GET /meta/templates — lista templates da WABA na Meta
+app.get('/meta/templates', async (req, res) => {
+  try {
+    const token = await redis.get('agenda:meta_token') || process.env.META_ACCESS_TOKEN;
+    const wabaId = await redis.get('agenda:meta_waba_id') || process.env.META_WABA_ID;
+    if (!token || !wabaId) {
+      return res.status(400).json({ error: 'Configure Token e WABA ID primeiro' });
+    }
+    const url = `https://graph.facebook.com/v19.0/${wabaId}/message_templates?limit=100`;
+    const resp = await axios.get(url, {
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 15000
+    });
+    const templates = (resp.data.data || []).map(t => ({
+      id: t.id,
+      name: t.name,
+      status: t.status,
+      category: t.category,
+      language: t.language,
+      components: t.components || [],
+      quality_score: t.quality_score
+    }));
+    res.json({ templates, total: templates.length });
+  } catch (e) {
+    const errMsg = e.response?.data?.error?.message || e.message;
+    log('error', 'Erro ao listar templates Meta', { error: errMsg });
+    res.status(500).json({ error: errMsg });
+  }
+});
+
+// POST /meta/templates — cria novo template na Meta
+app.post('/meta/templates', async (req, res) => {
+  try {
+    const token = await redis.get('agenda:meta_token') || process.env.META_ACCESS_TOKEN;
+    const wabaId = await redis.get('agenda:meta_waba_id') || process.env.META_WABA_ID;
+    if (!token || !wabaId) {
+      return res.status(400).json({ error: 'Configure Token e WABA ID primeiro' });
+    }
+    const { name, category, language, body_text } = req.body;
+    if (!name || !body_text) {
+      return res.status(400).json({ error: 'name e body_text obrigatórios' });
+    }
+    const url = `https://graph.facebook.com/v19.0/${wabaId}/message_templates`;
+    const payload = {
+      name: name.toLowerCase().replace(/[^a-z0-9_]/g, '_'),
+      category: category || 'UTILITY',
+      language: language || 'pt_BR',
+      components: [{
+        type: 'BODY',
+        text: body_text
+      }]
+    };
+    const resp = await axios.post(url, payload, {
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      timeout: 15000
+    });
+    log('info', 'Template criado na Meta', { name: payload.name, id: resp.data.id });
+    res.json({ ok: true, id: resp.data.id, status: resp.data.status });
+  } catch (e) {
+    const errMsg = e.response?.data?.error?.message || e.message;
+    log('error', 'Erro ao criar template Meta', { error: errMsg });
+    res.status(500).json({ error: errMsg });
+  }
+});
+
+// DELETE /meta/templates/:name — exclui template na Meta
+app.delete('/meta/templates/:name', async (req, res) => {
+  try {
+    const token = await redis.get('agenda:meta_token') || process.env.META_ACCESS_TOKEN;
+    const wabaId = await redis.get('agenda:meta_waba_id') || process.env.META_WABA_ID;
+    if (!token || !wabaId) {
+      return res.status(400).json({ error: 'Configure Token e WABA ID primeiro' });
+    }
+    const url = `https://graph.facebook.com/v19.0/${wabaId}/message_templates?name=${req.params.name}`;
+    await axios.delete(url, {
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 15000
+    });
+    log('info', 'Template excluído na Meta', { name: req.params.name });
+    res.json({ ok: true });
+  } catch (e) {
+    const errMsg = e.response?.data?.error?.message || e.message;
+    log('error', 'Erro ao excluir template Meta', { error: errMsg });
+    res.status(500).json({ error: errMsg });
+  }
+});
+
+// ──────────────────────────────────────────────
+// DETECÇÃO AUTOMÁTICA DE STATUS POR PALAVRAS-CHAVE
+const KEYWORDS = {
+  'nao-atendido': [
+    'não posso', 'nao posso', 'impossível', 'impossivel', 'ocupado',
+    'não vou', 'nao vou', 'cancelar', 'cancela', 'desmarcar', 'não', 'nao'
+  ],
+  reagendado: [
+    'remarcar', 'reagendar', 'outro dia', 'outra data', 'mudar data',
+    'mudar horário', 'mudar horario', 'pode ser amanhã', 'pode ser amanha',
+    'outra hora', 'diferente', 'semana que vem'
+  ],
+  confirmado: [
+    'sim', 'confirmo', 'confirmado', 'ok', 'pode vir', 'pode sim', 'pode confirmar', 'certo', 'perfeito',
+    'tá bom', 'ta bom', 'tudo bem', 'estarei', 'estarei lá', 'estarei la',
+    'combinado', 'show', 'vou estar', 'ótimo', 'otimo', 'beleza',
+    'claro', 'com certeza', 'positivo', '👍', '✅'
+  ]
+};
+
+function detectStatus(text) {
+  const t = text.toLowerCase().trim();
+  
+  const checkWords = (words) => words.some(w => {
+    // Para palavras curtas, força a busca como palavra inteira
+    if (['não', 'nao', 'ok', 'sim'].includes(w)) {
+      const regex = new RegExp(`(?:^|\\s|[.,!?])${w}(?:\\s|$|[.,!?])`, 'i');
+      return regex.test(t);
+    }
+    return t.includes(w);
+  });
+
+  // Prioridade 1: Cancelamentos e recusas
+  if (checkWords(KEYWORDS['nao-atendido'])) return 'nao-atendido';
+  
+  // Prioridade 2: Reagendamentos
+  if (checkWords(KEYWORDS.reagendado)) return 'reagendado';
+  
+  // Prioridade 3: Confirmações
+  if (checkWords(KEYWORDS.confirmado)) return 'confirmado';
+
+  return null;
+}
+
+// ──────────────────────────────────────────────
+// ROUTES
+// ──────────────────────────────────────────────
+
+// GET /status/:clientId — retorna status salvo
+app.get('/status/:clientId', async (req, res) => {
+  try {
+    const s = await getStatus(req.params.clientId);
+    res.json(s);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /status/:clientId — salva status manualmente
+app.post('/status/:clientId', async (req, res) => {
+  try {
+    const { status, obs } = req.body;
+    await setStatus(req.params.clientId, status, obs);
+
+    // Blacklist sync: se status == "bloqueado", adiciona telefone à blacklist
+    if (status === 'bloqueado') {
+      const cid = req.params.clientId;
+      const phonePart = cid.replace(/^wa_/, '').split('_')[0];
+      const v = validateAndCleanPhone(phonePart);
+      if (v.valid) {
+        await redis.sAdd(KEY_BLACKLIST, v.number);
+        log('info', 'Blacklist: número adicionado via status bloqueado', { phone: v.number, clientId: cid });
+      }
+    }
+
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /msgs/:phone — histórico de mensagens do número
+app.get('/msgs/:phone', async (req, res) => {
+  try {
+    const msgs = await getMsgs(req.params.phone);
+    res.json(msgs);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /send — envia mensagem para 1 cliente
+app.post('/send', async (req, res) => {
+  try {
+    if (!checkRateLimit('send')) {
+      return res.status(429).json({ error: 'Rate limit: máx 20 envios/min' });
+    }
+
+    const { phone, text, clientId } = req.body;
+    if (!phone || !text) return res.status(400).json({ error: 'phone e text obrigatórios' });
+
+    // ── Blacklist check (verifica ambas variações com/sem 9° dígito) ──
+    const vSend = validateAndCleanPhone(phone);
+    if (!vSend.valid) return res.status(400).json({ error: 'Número inválido', reason: vSend.reason });
+    const isBlocked = await redis.sIsMember(KEY_BLACKLIST, vSend.number);
+    const variantSend = getPhoneVariant(vSend.number);
+    const isBlockedVariant = variantSend ? await redis.sIsMember(KEY_BLACKLIST, variantSend) : false;
+    if (isBlocked || isBlockedVariant) return res.status(403).json({ error: 'Número bloqueado (blacklist)', phone: vSend.number });
+
+    const instance = 'Meta_API_Oficial';
+    const result = await sendText(phone, text);
+
+    // Salva número → clientId pra cruzar no webhook
+    if (clientId) {
+      let number = phone.replace(/\D/g, '');
+      if (!number.startsWith('55')) number = '55' + number;
+      await redis.set(KEY_PHONE_ID(number), clientId);
+    }
+
+    // Registra mensagem enviada
+    const msg = { from: 'me', text, ts: Date.now(), instance };
+    await appendMsg(phone.replace(/\D/g, ''), msg);
+
+    if (clientId) {
+      await setStatus(clientId, 'entregue', 'Mensagem enviada via painel');
+    }
+
+    res.json({ ok: true, result });
+  } catch (e) {
+    log('error', 'Erro ao enviar', { error: e.response?.data || e.message });
+    res.status(500).json({ error: e.response?.data || e.message });
+  }
+});
+
+// POST /send-bulk — disparo em massa com delay entre envios
+// Suporta: templates[] (rodízio) + windowMs (janela aleatória)
+// Backward compat: template (string única) + delayMs ainda funcionam
+app.post('/send-bulk', async (req, res) => {
+  try {
+    const { clients, template, templates: tplArray, delayMs = 3000, windowMs, remetente, metaTemplateName, metaTemplateLang, metaTemplateParamCount } = req.body;
+    const instance = 'Meta_API_Oficial';
+
+    // Monta array de templates: aceita tanto "template" (string) quanto "templates" (array)
+    let tpls = [];
+    if (Array.isArray(tplArray) && tplArray.length) {
+      tpls = tplArray;
+    } else if (template) {
+      tpls = [template];
+    }
+
+    if (!clients?.length || !tpls.length) {
+      return res.status(400).json({ error: 'clients e template/templates obrigatórios' });
+    }
+
+    // Salvar campanha
+    const campaignId = `camp_${Date.now()}`;
+    const campaign = {
+      id: campaignId,
+      total: clients.length,
+      template: tpls.length === 1 ? tpls[0] : `[${tpls.length} templates em rodízio]`,
+      startedAt: new Date().toISOString(),
+      success: 0,
+      failed: 0,
+      status: 'running',
+      instance,
+      mode: windowMs ? `janela ${Math.round(windowMs/60000)}min` : `fixo ${delayMs}ms`
+    };
+    await redis.set(`agenda:campaign:${campaignId}`, JSON.stringify(campaign));
+
+    res.json({ ok: true, total: clients.length, campaignId, message: 'Disparo iniciado em background' });
+
+    // Calcula delays entre envios
+    let delays = [];
+    if (windowMs && windowMs > 0 && clients.length > 1) {
+      // Gera pontos aleatórios dentro da janela, ordena e calcula intervalos
+      const points = [0];
+      for (let i = 1; i < clients.length; i++) {
+        points.push(Math.random() * windowMs);
+      }
+      points.sort((a, b) => a - b);
+      for (let i = 0; i < points.length; i++) {
+        delays.push(i === 0 ? points[0] : points[i] - points[i - 1]);
+      }
+    } else {
+      // Modo fixo (compatibilidade)
+      delays = clients.map(() => delayMs);
+    }
+
+    // Dispara em background
+    (async () => {
+      let success = 0, failed = 0;
+      for (let idx = 0; idx < clients.length; idx++) {
+        const c = clients[idx];
+        // ── Blacklist: validar e pular se bloqueado ──
+        const rawPhone = c.phone || c.tel1 || c.tel2 || '';
+        const vBulk = validateAndCleanPhone(rawPhone);
+        if (!vBulk.valid) {
+          log('warn', 'Número inválido, adicionando à blacklist', { nome: c.nome, phone: rawPhone, reason: vBulk.reason });
+          if (vBulk.number) await redis.sAdd(KEY_BLACKLIST, vBulk.number);
+          await setStatus(c.id, 'bloqueado', 'Número inválido: ' + vBulk.reason);
+          failed++;
+          continue;
+        }
+        const isBl = await redis.sIsMember(KEY_BLACKLIST, vBulk.number);
+        const variantBulk = getPhoneVariant(vBulk.number);
+        const isBlVariant = variantBulk ? await redis.sIsMember(KEY_BLACKLIST, variantBulk) : false;
+        if (isBl || isBlVariant) {
+          log('info', 'Número na blacklist, pulando', { nome: c.nome, phone: vBulk.number });
+          await setStatus(c.id, 'bloqueado', 'Número na blacklist');
+          failed++;
+          continue;
+        }
+        // Rodízio de templates
+        const chosenTpl = tpls[idx % tpls.length];
+        try {
+          // Se o frontend enviou metaTemplateName, usa direto (prioridade)
+          // Senão, tenta buscar pelo texto no Redis (fallback antigo)
+          let templateName = metaTemplateName || '';
+          if (!templateName) {
+            templateName = 'template_padrao';
+            const rawTemplates = await redis.get('agenda:templates');
+            if (rawTemplates) {
+              const parsed = JSON.parse(rawTemplates);
+              const found = parsed.find(t => t.text.trim() === chosenTpl.trim());
+              if (found && found.name) {
+                templateName = found.name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+              }
+            }
+          }
+          
+          // Se veio meta_name do template individual, prioriza sobre o global
+          if (chosenTpl.meta_name && chosenTpl.meta_name !== 'template_padrao') {
+            templateName = chosenTpl.meta_name;
+          }
+
+          let params = extractTemplateParams(typeof chosenTpl === 'string' ? chosenTpl : (chosenTpl.text || chosenTpl), c, remetente);
+
+          // Fallback: se é um template Meta e nenhum param foi detectado no texto,
+          // envia campos do cliente como parâmetros na ordem:
+          // {{1}}=nome, {{2}}=data, {{3}}=cidade, {{4}}=horario, {{5}}=endereco, {{6}}=tipo, {{7}}=remetente
+          if (params.length === 0 && metaTemplateName) {
+            const fallbackFields = [
+              c.nome || ' ',
+              c.data || ' ',
+              c.cidade || ' ',
+              c.horario || ' ',
+              c.endereco || ' ',
+              c.tipo || ' ',
+              remetente || ' '
+            ];
+            // Usa exatamente a qtd de params que o template espera
+            const count = metaTemplateParamCount || 1;
+            params = fallbackFields.slice(0, count).map(v => ({ type: "text", text: v }));
+          }
+
+          const components = params.length > 0 ? [{ type: "body", parameters: params }] : [];
+
+          await sendTemplate(c.phone || c.tel1 || c.tel2, templateName, components, metaTemplateLang || 'pt_BR');
+
+          const tplText = typeof chosenTpl === 'string' ? chosenTpl : (chosenTpl.text || '');
+          const text = tplText
+            // Chave dupla {{nome}}
+            .replace(/\{\{nome\}\}/gi, c.nome || '')
+            .replace(/\{\{data\}\}/gi, c.data || '')
+            .replace(/\{\{cidade\}\}/gi, c.cidade || '')
+            .replace(/\{\{horario\}\}/gi, c.horario || '')
+            .replace(/\{\{endereco\}\}/gi, c.endereco || '')
+            .replace(/\{\{tipo\}\}/gi, c.tipo || '')
+            .replace(/\{\{remetente\}\}/gi, remetente || '')
+            // Chave simples {nome}
+            .replace(/\{nome\}/gi, c.nome || '')
+            .replace(/\{data\}/gi, c.data || '')
+            .replace(/\{cidade\}/gi, c.cidade || '')
+            .replace(/\{horario\}/gi, c.horario || '')
+            .replace(/\{endereco\}/gi, c.endereco || '')
+            .replace(/\{tipo\}/gi, c.tipo || '')
+            .replace(/\{remetente\}/gi, remetente || '')
+            // Numéricas {{1}}, {{2}}, etc.
+            .replace(/\{\{1\}\}/g, c.nome || '')
+            .replace(/\{\{2\}\}/g, c.data || '')
+            .replace(/\{\{3\}\}/g, c.cidade || '')
+            .replace(/\{\{4\}\}/g, c.horario || '')
+            .replace(/\{\{5\}\}/g, c.endereco || '')
+            .replace(/\{\{6\}\}/g, c.tipo || '')
+            .replace(/\{\{7\}\}/g, remetente || '');
+
+          let number = (c.phone || c.tel1 || c.tel2 || '').replace(/\D/g, '');
+          if (!number.startsWith('55')) number = '55' + number;
+          await redis.set(KEY_PHONE_ID(number), c.id);
+
+          const msg = { from: 'me', text, ts: Date.now(), instance };
+          await appendMsg(number, msg);
+
+          await setStatus(c.id, 'entregue', 'Disparo em massa realizado');
+
+          success++;
+          log('info', 'Enviado', { nome: c.nome, phone: number, instance, tplIdx: idx % tpls.length });
+        } catch (e) {
+          failed++;
+          const errData = e.response?.data?.error || {};
+          const errCode = errData.code || 0;
+          // Auto-blacklist: erro 131026 (número inválido na Meta)
+          if (errCode === 131026 || errCode === 131052 || errCode === 131049) {
+            const ph = (c.phone || c.tel1 || c.tel2 || '').replace(/\D/g, '');
+            let blNum = ph;
+            if (!blNum.startsWith('55')) blNum = '55' + blNum;
+            await redis.sAdd(KEY_BLACKLIST, blNum);
+            await setStatus(c.id, 'bloqueado', 'Erro Meta ' + errCode);
+            log('warn', 'Auto-blacklist por erro Meta', { phone: blNum, errCode, nome: c.nome });
+          }
+          log('error', 'Falha envio', { nome: c.nome, error: e.response?.data || e.message });
+        }
+
+        // Aguarda delay (fixo ou aleatório conforme modo)
+        if (idx < clients.length - 1) {
+          await new Promise(r => setTimeout(r, delays[idx + 1] || delayMs));
+        }
+      }
+
+      // Atualiza campanha
+      campaign.success = success;
+      campaign.failed = failed;
+      campaign.status = 'done';
+      campaign.finishedAt = new Date().toISOString();
+      await redis.set(`agenda:campaign:${campaignId}`, JSON.stringify(campaign));
+
+      log('info', 'Disparo concluído', { success, failed, campaignId, instance });
+    })();
+
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /send-reply — envia resposta manual pelo painel
+app.post('/send-reply', async (req, res) => {
+  try {
+    if (!checkRateLimit('reply')) {
+      return res.status(429).json({ error: 'Rate limit atingido' });
+    }
+    const { phone, text } = req.body;
+    const instance = 'Meta_API_Oficial';
+    await sendText(phone, text);
+    const msg = { from: 'me', text, ts: Date.now(), instance };
+    let number = phone.replace(/\D/g, '');
+    await appendMsg(number, msg);
+    // Clear unread counter
+    await redis.del(KEY_UNREAD(number));
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /all-status — retorna todos os status salvos (para sync do frontend)
+app.get('/all-status', async (req, res) => {
+  try {
+    const keys = await redis.keys('agenda:status:*');
+    const result = {};
+    for (const key of keys) {
+      const id = key.replace('agenda:status:', '');
+      const v = await redis.get(key);
+      result[id] = v ? JSON.parse(v) : null;
+    }
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /unread — retorna contadores de não lidas
+app.get('/unread', async (req, res) => {
+  try {
+    const keys = await redis.keys('agenda:unread:*');
+    const result = {};
+    for (const key of keys) {
+      const phone = key.replace('agenda:unread:', '');
+      const count = await redis.get(key);
+      if (count && parseInt(count) > 0) result[phone] = parseInt(count);
+    }
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ──────────────────────────────────────────────
+// BLACKLIST ROUTES
+// ──────────────────────────────────────────────
+app.get('/agenda/blacklist', async (req, res) => {
+  try {
+    const members = await redis.sMembers(KEY_BLACKLIST);
+    res.json(members || []);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/agenda/blacklist', async (req, res) => {
+  try {
+    const { numbers } = req.body;
+    if (!Array.isArray(numbers)) return res.status(400).json({ error: 'numbers deve ser array' });
+    let added = 0;
+    for (const n of numbers) {
+      const r = validateAndCleanPhone(n);
+      if (r.valid) { await redis.sAdd(KEY_BLACKLIST, r.number); added++; }
+    }
+    res.json({ ok: true, added });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/agenda/blacklist', async (req, res) => {
+  try {
+    const { numbers } = req.body;
+    if (!Array.isArray(numbers)) return res.status(400).json({ error: 'numbers deve ser array' });
+    let removed = 0;
+    for (const n of numbers) {
+      const r = validateAndCleanPhone(n);
+      if (r.valid) { await redis.sRem(KEY_BLACKLIST, r.number); removed++; }
+    }
+    res.json({ ok: true, removed });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ──────────────────────────────────────────────
+// CLIENTS (GLOBAL AGENDA)
+// ──────────────────────────────────────────────
+const KEY_CLIENTS = 'agenda:clients';
+
+app.get('/agenda/clients', async (req, res) => {
+  try {
+    const raw = await redis.get(KEY_CLIENTS);
+    res.json(raw ? JSON.parse(raw) : []);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/agenda/clients', async (req, res) => {
+  try {
+    const newClients = req.body.clients || [];
+    if (!Array.isArray(newClients)) return res.status(400).json({ error: 'clients deve ser array' });
+    
+    const raw = await redis.get(KEY_CLIENTS);
+    const existing = raw ? JSON.parse(raw) : [];
+    
+    const map = new Map();
+    existing.forEach(c => map.set(c.id, c));
+    newClients.forEach(c => map.set(c.id, c));
+    
+    const merged = Array.from(map.values());
+    await redis.set(KEY_CLIENTS, JSON.stringify(merged));
+    res.json({ ok: true, count: merged.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/agenda/clear', async (req, res) => {
+  try {
+    await redis.del(KEY_CLIENTS);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ──────────────────────────────────────────────
+// TEMPLATES (salvar e listar)
+// ──────────────────────────────────────────────
+app.get('/templates', async (req, res) => {
+  try {
+    const raw = await redis.get(KEY_TEMPLATES);
+    res.json(raw ? JSON.parse(raw) : []);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/templates', async (req, res) => {
+  try {
+    const { name, text } = req.body;
+    if (!name || !text) return res.status(400).json({ error: 'name e text obrigatórios' });
+    const raw = await redis.get(KEY_TEMPLATES);
+    const templates = raw ? JSON.parse(raw) : [];
+    templates.push({ id: `tpl_${Date.now()}`, name, text, createdAt: new Date().toISOString() });
+    await redis.set(KEY_TEMPLATES, JSON.stringify(templates));
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/templates/:id', async (req, res) => {
+  try {
+    const raw = await redis.get(KEY_TEMPLATES);
+    const templates = raw ? JSON.parse(raw) : [];
+    const filtered = templates.filter(t => t.id !== req.params.id);
+    await redis.set(KEY_TEMPLATES, JSON.stringify(filtered));
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ──────────────────────────────────────────────
+// CAMPAIGNS HISTORY
+// ──────────────────────────────────────────────
+app.get('/campaigns', async (req, res) => {
+  try {
+    const keys = await redis.keys('agenda:campaign:*');
+    const campaigns = [];
+    for (const key of keys) {
+      const v = await redis.get(key);
+      if (v) campaigns.push(JSON.parse(v));
+    }
+    campaigns.sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt));
+    res.json(campaigns.slice(0, 20));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ──────────────────────────────────────────────
+// EXPORT CSV — relatório consolidado
+// ──────────────────────────────────────────────
+app.get('/export-csv', async (req, res) => {
+  try {
+    const keys = await redis.keys('agenda:status:*');
+    let csv = 'ClienteID,Status,Observação,Atualizado Em\n';
+    for (const key of keys) {
+      const id = key.replace('agenda:status:', '');
+      const v = await redis.get(key);
+      if (v) {
+        const d = JSON.parse(v);
+        csv += `"${id}","${d.status}","${(d.obs || '').replace(/"/g, '""')}","${d.updatedAt || ''}"\n`;
+      }
+    }
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename=agenda_report_${new Date().toISOString().split('T')[0]}.csv`);
+    res.send('\ufeff' + csv);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ──────────────────────────────────────────────
+// DASHBOARD SUMMARY — dados para a aba do Dashboard
+// ──────────────────────────────────────────────
+app.get('/dashboard-summary', async (req, res) => {
+  try {
+    const keys = await redis.keys('agenda:status:*');
+    const summary = { total: 0, confirmado: 0, pendente: 0, 'nao-atendido': 0, reagendado: 0 };
+    for (const key of keys) {
+      const v = await redis.get(key);
+      if (v) {
+        const d = JSON.parse(v);
+        summary.total++;
+        summary[d.status] = (summary[d.status] || 0) + 1;
+      }
+    }
+    summary.taxa_confirmacao = summary.total > 0
+      ? Math.round(summary.confirmado / summary.total * 1000) / 10
+      : 0;
+    res.json(summary);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ──────────────────────────────────────────────
+// WEBHOOK — recebe mensagens da Meta API
+// ──────────────────────────────────────────────
+
+app.get('/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+  if (mode === 'subscribe' && token === META_VERIFY_TOKEN) {
+    res.status(200).send(challenge);
+  } else {
+    res.sendStatus(403);
+  }
+});
+
+// ──────────────────────────────────────────────
+// JARVIS IA — Debounce para não sobrecarregar
+// ──────────────────────────────────────────────
+const jarvisDebounce = {};
+const JARVIS_COOLDOWN = 30000; // 30 segundos entre chamadas pro mesmo número
+
+function shouldCallJarvis(phone) {
+  const now = Date.now();
+  if (jarvisDebounce[phone] && now - jarvisDebounce[phone] < JARVIS_COOLDOWN) {
+    return false;
+  }
+  jarvisDebounce[phone] = now;
+  return true;
+}
+
+// Verifica se o cliente foi disparado hoje a partir das 16h
+async function isEligibleForJarvis(clientId) {
+  try {
+    const statusRaw = await redis.get(KEY_STATUS(clientId));
+    if (!statusRaw) return false;
+    const statusData = JSON.parse(statusRaw);
+    // Precisa ter sido "entregue" (disparado)
+    if (!statusData.status || !statusData.status.startsWith('entregue')) return false;
+    if (!statusData.updatedAt) return false;
+    const updatedAt = new Date(statusData.updatedAt);
+    const now = new Date();
+    // Mesmo dia
+    if (updatedAt.toDateString() !== now.toDateString()) return false;
+    // A partir das 16h (19h UTC = 16h BRT)
+    const cutoffToday = new Date(now);
+    cutoffToday.setUTCHours(19, 0, 0, 0); // 16h BRT = 19h UTC
+    return updatedAt >= cutoffToday;
+  } catch (e) {
+    log('warn', 'Erro ao verificar elegibilidade Jarvis', { error: e.message });
+    return false;
+  }
+}
+
+app.post('/webhook', async (req, res) => {
+  res.sendStatus(200);
+  try {
+    const body = req.body;
+    if (body.object === 'whatsapp_business_account') {
+      for (const entry of body.entry) {
+        for (const change of entry.changes) {
+          if (change.value.messages && change.value.messages.length > 0) {
+            const msg = change.value.messages[0];
+            let phone = msg.from;
+            if (!phone.startsWith('55')) phone = '55' + phone;
+
+            const text = msg.text ? msg.text.body : (msg.button ? msg.button.text : '');
+            if (!text) continue;
+
+            const instance = 'Meta API Oficial';
+
+            log('info', 'Msg webhook', { phone, type: msg.type || 'text', text: text.slice(0, 60) });
+
+            await appendMsg(phone, { from: 'client', text, ts: Date.now(), instance });
+            await redis.incr(KEY_UNREAD(phone));
+
+            // ── JARVIS IA ──────────────────────────────
+            const clientId = await redis.get(KEY_PHONE_ID(phone));
+            const jarvisUrl = process.env.JARVIS_URL || 'http://jarvis-app:8501';
+            let jarvisHandled = false;
+
+            if (clientId && shouldCallJarvis(phone)) {
+              const eligible = await isEligibleForJarvis(clientId);
+
+              if (eligible) {
+                try {
+                  // Buscar dados do cliente para contexto
+                  const clientRaw = await redis.get(KEY_CLIENTS);
+                  const clients = clientRaw ? JSON.parse(clientRaw) : [];
+                  const client = clients.find(c => c.id === clientId) || {};
+
+                  const firstName = (client.nome || 'Cliente').split(' ')[0];
+                  const firstName2 = firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase();
+
+                  const jarvisPrompt = [
+                    `[ATENDIMENTO AUTOMÁTICO] Cliente respondeu no WhatsApp.`,
+                    ``,
+                    `DADOS DO CLIENTE:`,
+                    `- Nome completo: ${client.nome || 'Desconhecido'}`,
+                    `- Primeiro nome: ${firstName2}`,
+                    `- Telefone: ${phone}`,
+                    `- Cliente ID: ${clientId}`,
+                    `- Serviço: ${client.tipo || 'Visita técnica'}`,
+                    `- Data agendada: ${client.data || 'Não informada'}`,
+                    `- Horário/Turno: ${client.horario || 'Não informado'}`,
+                    `- Cidade: ${client.cidade || ''}`,
+                    ``,
+                    `MENSAGEM DO CLIENTE: "${text}"`,
+                    ``,
+                    `TOM DE VOZ (OBRIGATÓRIO):`,
+                    `- Profissional amigável, sem emoji, sem gírias`,
+                    `- Trate pelo PRIMEIRO NOME: ${firstName2}`,
+                    `- Abertura: "Olá, ${firstName2}! Aqui é o Rodrigo da Svoboda."`,
+                    `- SEM assinatura "Equipe Svoboda" no final`,
+                    `- Mensagens curtas e diretas, máx 160 caracteres`,
+                    ``,
+                    `AÇÕES (use as ferramentas corretas):`,
+                    `1. Para ATUALIZAR STATUS: use agenda_atualizar_status(cliente_id="${clientId}", status="...", obs="...")`,
+                    `   - Status válidos: confirmado, reagendado, nao-atendido`,
+                    `2. Para RESPONDER ao cliente: use agenda_enviar_mensagem(phone="${phone}", texto="...", cliente_id="${clientId}")`,
+                    ``,
+                    `REGRAS DE COMPORTAMENTO:`,
+                    `- Se o cliente CONFIRMA: status "confirmado" + resposta confirmando data/horário`,
+                    `- Se o cliente quer REAGENDAR: status "reagendado" + resposta acolhedora`,
+                    `- Se o cliente RECUSA/CANCELA: status "nao-atendido" + resposta educada`,
+                    `- Se for saudação ("oi", "quem é?", "é da Giga?"): responda educadamente SEM alterar status`,
+                    `- Perguntas técnicas sem resposta no contexto: NÃO responda + status "nao-atendido" com obs "tratar manualmente"`,
+                    `- NUNCA invente informações. Use APENAS os dados acima.`,
+                    `- Incentive ATIVAMENTE a confirmação no prazo da data agendada`
+                  ].join('\n');
+
+                  const resp = await axios.post(`${jarvisUrl}/api/chat`, {
+                    message: jarvisPrompt
+                  }, { timeout: 30000 });
+
+                  jarvisHandled = true;
+                  log('info', 'Jarvis processou', {
+                    phone,
+                    clientId,
+                    tools: resp.data.tools_used || [],
+                    provider: resp.data.provider
+                  });
+
+                } catch (e) {
+                  log('error', 'Jarvis falhou', { phone, error: e.message });
+                }
+              }
+            }
+
+            // Fallback: keywords antigas (se Jarvis não processou)
+            if (!jarvisHandled && clientId) {
+              const detected = detectStatus(text);
+              if (detected) {
+                const obs = `Auto-kw: "${text.slice(0, 60)}"`;
+                await setStatus(clientId, detected, obs);
+              }
+            }
+
+          } else if (change.value.statuses && change.value.statuses.length > 0) {
+            // Pode processar status de entrega futuramente
+          }
+        }
+      }
+    }
+  } catch (e) {
+    log('error', 'Meta Webhook error', { error: e.message });
+  }
+});
+
+// ──────────────────────────────────────────────
+// CONVERSATIONS — lista conversas para a aba Chat
+// ──────────────────────────────────────────────
+app.get('/conversations', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+
+    // Busca todas as chaves de mensagens no Redis
+    const msgKeys = await redis.keys('agenda:msgs:*');
+    const conversations = [];
+
+    for (const key of msgKeys) {
+      const phone = key.replace('agenda:msgs:', '');
+      const raw = await redis.get(key);
+      if (!raw) continue;
+
+      const msgs = JSON.parse(raw);
+      if (!msgs.length) continue;
+
+      const lastMsg = msgs[msgs.length - 1];
+      const unreadRaw = await redis.get(KEY_UNREAD(phone));
+      const unread = unreadRaw ? parseInt(unreadRaw) : 0;
+
+      conversations.push({
+        phone,
+        lastMessage: (lastMsg.text || '').substring(0, 100),
+        lastTs: lastMsg.ts,
+        lastFrom: lastMsg.from,
+        unread
+      });
+    }
+
+    // Ordena por timestamp mais recente
+    conversations.sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
+
+    const total = conversations.length;
+    const pages = Math.ceil(total / limit) || 1;
+    const start = (page - 1) * limit;
+    const sliced = conversations.slice(start, start + limit);
+
+    res.json({
+      conversations: sliced,
+      page,
+      pages,
+      total
+    });
+  } catch (e) {
+    log('error', 'Erro ao listar conversas', { error: e.message });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ──────────────────────────────────────────────
+// HEALTH
+// ──────────────────────────────────────────────
+app.get('/health', (_, res) => res.json({ ok: true, ts: new Date().toISOString() }));
+app.get('/', (_, res) => res.json({ service: 'WhatsApp Agenda API', version: '2.0', status: 'online' }));
+
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => log('info', `Backend rodando na porta ${PORT}`));

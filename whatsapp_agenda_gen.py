@@ -37,6 +37,7 @@ def gerar_whatsapp_agenda_html(backend_url="https://svoboda.rtflowapp.com/api/ag
 .wa-badge.insatisfeito{{background:rgba(239,68,68,.15);color:#ef4444}}
 .wa-badge.problema-aberto{{background:rgba(251,146,60,.15);color:#fb923c}}
 .wa-badge.elogio{{background:rgba(234,179,8,.15);color:#fbbf24}}
+.wa-badge.bloqueado{{background:rgba(239,68,68,.2);color:#ef4444;border:1px solid rgba(239,68,68,.3)}}
 .wa-file-drop{{border:2px dashed #1c2237;border-radius:12px;padding:40px;text-align:center;cursor:pointer;transition:all .2s;background:#0d1117}}
 .wa-file-drop:hover{{border-color:#25d366;background:#0a1510}}
 .wa-tbl-wrap{{max-height:400px;overflow-y:auto}}
@@ -126,6 +127,7 @@ def gerar_whatsapp_agenda_html(backend_url="https://svoboda.rtflowapp.com/api/ag
           <label class="wa-dd-item"><input type="checkbox" value="sem-contato" onchange="waFilterTable()"> SEM CONTATO</label>
           <label class="wa-dd-item"><input type="checkbox" value="resolvido" onchange="waFilterTable()"> RESOLVIDO</label>
           <label class="wa-dd-item"><input type="checkbox" value="aberto-reparo" onchange="waFilterTable()"> ABERTO REPARO</label>
+          <label class="wa-dd-item"><input type="checkbox" value="problema-aberto" onchange="waFilterTable()"> 🔧 Problema Aberto</label>
           <label class="wa-dd-item"><input type="checkbox" value="problema-na-rede" onchange="waFilterTable()"> PROBLEMA NA REDE</label>
           <label class="wa-dd-item"><input type="checkbox" value="central" onchange="waFilterTable()"> CENTRAL</label>
           <label class="wa-dd-item"><input type="checkbox" value="cancelamento-do-contrato" onchange="waFilterTable()"> CANCELAMENTO DO CONTRATO</label>
@@ -136,6 +138,7 @@ def gerar_whatsapp_agenda_html(backend_url="https://svoboda.rtflowapp.com/api/ag
           <label class="wa-dd-item"><input type="checkbox" value="area-de-risco" onchange="waFilterTable()"> ÁREA DE RISCO</label>
           <label class="wa-dd-item"><input type="checkbox" value="nao-se-encontra" onchange="waFilterTable()"> NÃO SE ENCONTRA</label>
           <label class="wa-dd-item"><input type="checkbox" value="solicitou-upgrade" onchange="waFilterTable()"> SOLICITOU UPGRADE</label>
+          <label class="wa-dd-item"><input type="checkbox" value="bloqueado" onchange="waFilterTable()"> 🚫 Bloqueado</label>
         </div>
       </div>
       <div class="wa-dd-wrap">
@@ -282,6 +285,153 @@ def gerar_whatsapp_agenda_html(backend_url="https://svoboda.rtflowapp.com/api/ag
         </div>
       </div>
     </div>
+
+    <!-- SEÇÃO: Fluxo Automático de Respostas -->
+    <div style="margin-top:24px">
+      <div class="section-title">🤖 Fluxo Automático de Respostas</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+
+        <!-- Card Configuração -->
+        <div class="chart-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+            <span style="font-size:13px;font-weight:700;color:#25d366">Configurar Fluxo</span>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+              <span style="font-size:11px;color:#64748b">Ativo:</span>
+              <input type="checkbox" id="fluxo-ativo" onchange="waFluxoToggle(this.checked)" style="width:16px;height:16px;accent-color:#25d366;cursor:pointer">
+            </label>
+          </div>
+
+          <div style="margin-bottom:10px">
+            <div style="font-size:11px;color:#64748b;margin-bottom:4px">⏱️ Aguardar (segundos) antes de responder:</div>
+            <input class="wa-cfg-input" type="number" id="fluxo-delay" value="10" min="0" max="300" style="width:100px">
+          </div>
+
+          <div style="margin-bottom:10px">
+            <div style="font-size:11px;color:#25d366;font-weight:600;margin-bottom:4px">✅ Mensagem quando cliente responder SIM:</div>
+            <textarea class="wa-cfg-input" id="fluxo-msg-sim" rows="3" style="width:100%;resize:vertical;font-size:12px" placeholder="Que ótimo! Ficamos felizes que tudo correu bem. 😊">Que ótimo! Ficamos felizes que tudo correu bem. 😊 Qualquer dúvida, estamos à disposição!</textarea>
+          </div>
+
+          <div style="margin-bottom:10px">
+            <div style="font-size:11px;color:#ff4d6d;font-weight:600;margin-bottom:4px">❌ Mensagem quando cliente responder NÃO:</div>
+            <textarea class="wa-cfg-input" id="fluxo-msg-nao" rows="3" style="width:100%;resize:vertical;font-size:12px" placeholder="Lamentamos o ocorrido!">Lamentamos o ocorrido! Nossa equipe de suporte será acionada para resolver o problema. ⚙️</textarea>
+          </div>
+
+          <div style="margin-bottom:14px">
+            <div style="font-size:11px;color:#94a3b8;font-weight:600;margin-bottom:4px">💬 Mensagem para qualquer outra resposta:</div>
+            <textarea class="wa-cfg-input" id="fluxo-msg-outro" rows="3" style="width:100%;resize:vertical;font-size:12px" placeholder="Obrigado pelo retorno!">Obrigado pelo retorno! Em breve um de nossos atendentes entrará em contato. 🙏</textarea>
+          </div>
+
+          <button class="wa-cfg-btn" onclick="waFluxoSaveConfig()" style="width:100%">
+            💾 Salvar Configuração de Fluxo
+          </button>
+          <div id="fluxo-save-msg" style="font-size:11px;color:#25d366;margin-top:6px;text-align:center;display:none">✓ Configuração salva!</div>
+
+          <div style="margin-top:10px;font-size:10px;color:#64748b;background:rgba(37,211,102,.04);border:1px solid rgba(37,211,102,.1);border-radius:6px;padding:8px">
+            <strong>Como funciona:</strong> Ao disparar com fluxo ativo, o servidor monitora respostas 24/7 e envia a mensagem certa automaticamente.
+          </div>
+        </div>
+
+        <!-- Card Fluxos Ativos -->
+        <div class="chart-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+            <span style="font-size:13px;font-weight:700;color:#25d366">Fluxos Ativos</span>
+            <div style="display:flex;gap:8px">
+              <button class="wa-cfg-btn secondary" onclick="waFluxoLoadAtivos()" style="font-size:11px;padding:4px 10px;height:auto">🔄</button>
+              <button class="wa-cfg-btn secondary" onclick="waFluxoLimpar()" style="font-size:11px;padding:4px 10px;height:auto;color:#ff4d6d;border-color:#ff4d6d33">🗑️ Limpar concluídos</button>
+            </div>
+          </div>
+          <div id="fluxo-status-bar" style="display:flex;gap:12px;margin-bottom:10px;font-size:11px">
+            <span>⏳ <strong id="fluxo-cnt-aguardando">0</strong> aguardando</span>
+            <span style="color:#25d366">✅ <strong id="fluxo-cnt-respondidos">0</strong> respondidos</span>
+            <span style="color:#64748b">🚫 <strong id="fluxo-cnt-cancelados">0</strong> cancelados</span>
+          </div>
+          <div id="fluxo-table-wrap" style="max-height:320px;overflow-y:auto">
+            <div style="text-align:center;color:#64748b;font-size:12px;padding:30px" id="fluxo-empty">
+              Nenhum fluxo ativo. Dispare com o fluxo ativado para começar.
+            </div>
+            <table id="fluxo-table" style="width:100%;border-collapse:collapse;font-size:11px;display:none">
+              <thead>
+                <tr style="color:#64748b;border-bottom:1px solid #1c2237">
+                  <th style="text-align:left;padding:4px 6px;font-weight:600">Cliente</th>
+                  <th style="text-align:left;padding:4px 6px;font-weight:600">Status</th>
+                  <th style="text-align:left;padding:4px 6px;font-weight:600">Resposta</th>
+                  <th style="text-align:center;padding:4px 6px;font-weight:600">Ação</th>
+                </tr>
+              </thead>
+              <tbody id="fluxo-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+    </div>
+    <!-- FIM SEÇÃO FLUXO -->
+
+    <!-- SEÇÃO: Respostas Automáticas dos Botões Meta (editável) -->
+    <div style="margin-top:24px">
+      <style>
+      .btn-cfg-section{{background:#0d1117;border:1px solid #1c2237;border-radius:12px;padding:20px}}
+      .btn-cfg-title{{font-size:15px;font-weight:800;color:#25d366;margin-bottom:16px;display:flex;align-items:center;gap:8px}}
+      .btn-cfg-grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}
+      .btn-cfg-card{{background:#111520;border:1px solid #1c2237;border-radius:10px;padding:14px}}
+      .btn-cfg-label{{font-size:11px;font-weight:700;margin-bottom:6px;display:flex;align-items:center;gap:6px}}
+      .btn-cfg-label.green{{color:#25d366}}
+      .btn-cfg-label.blue{{color:#60a5fa}}
+      .btn-cfg-label.red{{color:#ff4d6d}}
+      .btn-cfg-label.purple{{color:#a78bfa}}
+      .btn-cfg-label.orange{{color:#fb923c}}
+      .btn-cfg-textarea{{width:100%;background:#0d1117;border:1px solid #1c2237;border-radius:8px;padding:8px 12px;color:#e8eaf6;font-size:12px;font-family:inherit;resize:vertical;outline:none;box-sizing:border-box}}
+      .btn-cfg-textarea:focus{{border-color:#25d366}}
+      .btn-cfg-save{{background:#25d366;color:#022c22;border:none;padding:12px 24px;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;width:100%;margin-top:16px;font-family:inherit;transition:all .2s}}
+      .btn-cfg-save:hover{{background:#128c7e;color:#fff}}
+      .btn-cfg-status{{text-align:center;font-size:12px;margin-top:8px;color:#25d366;display:none}}
+      .btn-cfg-flow-title{{font-size:13px;font-weight:700;color:#94a3b8;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #1c2237;grid-column:1/-1}}
+      </style>
+      <div class="btn-cfg-section" id="btn-cfg-section">
+        <div class="btn-cfg-title">🤖 Respostas Automáticas dos Botões <span style="font-size:11px;color:#64748b;font-weight:400">(editável — use NOME para inserir o primeiro nome do cliente)</span></div>
+        <div class="btn-cfg-grid">
+          <div class="btn-cfg-flow-title">🔵 Fluxo A — Confirmação de Visita</div>
+          <div class="btn-cfg-card">
+            <div class="btn-cfg-label green">✅ Botão: "SIM, confirmo" → confirmado</div>
+            <textarea class="btn-cfg-textarea" id="bcfg-sim-confirmo" rows="3"></textarea>
+          </div>
+          <div class="btn-cfg-card">
+            <div class="btn-cfg-label purple">🔄 Botão: "Preciso reagendar" → reagendado</div>
+            <textarea class="btn-cfg-textarea" id="bcfg-preciso-reagendar" rows="3"></textarea>
+          </div>
+          <div class="btn-cfg-card">
+            <div class="btn-cfg-label red">❌ Botão: "Cancelar" → não atendido</div>
+            <textarea class="btn-cfg-textarea" id="bcfg-cancelar" rows="3"></textarea>
+          </div>
+          <div class="btn-cfg-flow-title">🟠 Fluxo B — Recolhimento de Equipamento</div>
+          <div class="btn-cfg-card">
+            <div class="btn-cfg-label blue">📅 Botão: "Agendar" → agendado</div>
+            <textarea class="btn-cfg-textarea" id="bcfg-agendar" rows="3"></textarea>
+          </div>
+          <div class="btn-cfg-card">
+            <div class="btn-cfg-label green">✅ Botão: "Já devolvi" → resolvido</div>
+            <textarea class="btn-cfg-textarea" id="bcfg-ja-devolvi" rows="3"></textarea>
+          </div>
+          <div class="btn-cfg-flow-title">🟢 Fluxo C — Pesquisa de Qualidade</div>
+          <div class="btn-cfg-card">
+            <div class="btn-cfg-label green">😊 Botão: "SIM, tudo certo" → satisfeito</div>
+            <textarea class="btn-cfg-textarea" id="bcfg-sim-tudo-certo" rows="3"></textarea>
+          </div>
+          <div class="btn-cfg-card">
+            <div class="btn-cfg-label red">😟 Botão: "NÃO, tenho problema" → problema aberto</div>
+            <textarea class="btn-cfg-textarea" id="bcfg-nao-tenho-problema" rows="3"></textarea>
+          </div>
+          <div class="btn-cfg-card">
+            <div class="btn-cfg-label orange">🗣️ Botão: "Quero falar com alguém" → problema aberto</div>
+            <textarea class="btn-cfg-textarea" id="bcfg-quero-falar" rows="3"></textarea>
+          </div>
+        </div>
+        <button class="btn-cfg-save" onclick="btnCfgSave()">💾 Salvar Respostas Automáticas</button>
+        <div class="btn-cfg-status" id="btn-cfg-status">✓ Salvo com sucesso!</div>
+      </div>
+    </div>
+    <!-- FIM SEÇÃO BOTÕES -->
+
   </div>
 
   <!-- SUB: Configuração -->
@@ -487,7 +637,7 @@ def gerar_whatsapp_agenda_html(backend_url="https://svoboda.rtflowapp.com/api/ag
   // ── WhatsApp Agenda State ──
   var waClients=[], waSelected=new Set(), waTratativas={{}}, waSort={{col:'nome',dir:'asc'}};
   var WA_BACKEND='', WA_KEY='', WA_INSTANCE='';
-  var WA_STATUS_LABELS={{pendente:'⏳ Pendente',confirmado:'✅ Confirmado','nao-atendido':'📵 Não Atendeu',reagendado:'🔁 Reagendado',entregue:'📤 Entregue',conveniente:'🟡 Conveniente','entregue-d1':'📥 Entregue D-1','entregue-d0':'📨 Entregue D-0','entregue-pos':'📤 Entregue Pós',satisfeito:'😊 Satisfeito',insatisfeito:'😤 Insatisfeito','problema-aberto':'🔧 Problema Aberto',elogio:'⭐ Elogio',normalizado:'NORMALIZADO','sem-contato':'SEM CONTATO',resolvido:'RESOLVIDO','aberto-reparo':'ABERTO REPARO','problema-na-rede':'PROBLEMA NA REDE',central:'CENTRAL','cancelamento-do-contrato':'CANCELAMENTO DO CONTRATO',agendado:'AGENDADO','suspenso-por-debito':'SUSPENSO POR DÉBITO','sem-retorno-supervisao':'SEM RETORNO SUPERVISÃO','numero-nao-pertence':'NÚMERO NÃO PERTENCE','area-de-risco':'ÁREA DE RISCO','nao-se-encontra':'NÃO SE ENCONTRA','solicitou-upgrade':'SOLICITOU UPGRADE'}};
+  var WA_STATUS_LABELS={{pendente:'⏳ Pendente',confirmado:'✅ Confirmado','nao-atendido':'📵 Não Atendeu',reagendado:'🔁 Reagendado',entregue:'📤 Entregue',conveniente:'🟡 Conveniente','entregue-d1':'📥 Entregue D-1','entregue-d0':'📨 Entregue D-0','entregue-pos':'📤 Entregue Pós',satisfeito:'😊 Satisfeito',insatisfeito:'😤 Insatisfeito','problema-aberto':'🔧 Problema Aberto',elogio:'⭐ Elogio',normalizado:'NORMALIZADO','sem-contato':'SEM CONTATO',resolvido:'RESOLVIDO','aberto-reparo':'ABERTO REPARO','problema-na-rede':'PROBLEMA NA REDE',central:'CENTRAL','cancelamento-do-contrato':'CANCELAMENTO DO CONTRATO',agendado:'AGENDADO','suspenso-por-debito':'SUSPENSO POR DÉBITO','sem-retorno-supervisao':'SEM RETORNO SUPERVISÃO','numero-nao-pertence':'NÚMERO NÃO PERTENCE','area-de-risco':'ÁREA DE RISCO','nao-se-encontra':'NÃO SE ENCONTRA','solicitou-upgrade':'SOLICITOU UPGRADE',bloqueado:'🚫 Bloqueado'}};
 
   function showWaSub(id,btn){{
     document.querySelectorAll('.wa-sub').forEach(function(s){{s.classList.remove('active')}});
@@ -1026,9 +1176,9 @@ def gerar_whatsapp_agenda_html(backend_url="https://svoboda.rtflowapp.com/api/ag
       var fase=waGetFase(c);
       var sel=document.getElementById('wa-chat-status');
       if(fase==='pos'){{
-        sel.innerHTML='<option value="pendente">⏳ Pendente</option><option value="confirmado">✅ Confirmado</option><option value="nao-atendido">🚫 Não Atendeu</option><option value="reagendado">🔄 Reagendado</option><option value="conveniente">🟢 Conveniente</option><option value="cancelamento-do-contrato">❌ Cancelado</option><option value="entregue">📬 Entregue</option><option value="entregue-d1">📬 Entregue D-1</option><option value="entregue-d0">📬 Entregue D-0</option><option value="entregue-pos">📬 Entregue Pós</option><option value="normalizado">✅ Normalizado</option><option value="resolvido">✅ Resolvido</option><option value="aberto-reparo">🔧 Aberto Reparo</option><option value="problema-na-rede">🌐 Problema na Rede</option><option value="central">🏢 Central</option><option value="agendado">📅 Agendado</option><option value="suspenso-por-debito">💰 Suspenso por Débito</option><option value="numero-nao-pertence">❓ Número Não Pertence</option><option value="area-de-risco">⚠️ Área de Risco</option><option value="nao-se-encontra">🏠 Não se Encontra</option><option value="solicitou-upgrade">⬆️ Solicitou Upgrade</option><option value="sem-contato">📴 Sem Contato</option><option value="sem-retorno-supervisao">⏳ Sem Retorno Supervisão</option>';
+        sel.innerHTML='<option value="pendente">⏳ Pendente</option><option value="confirmado">✅ Confirmado</option><option value="nao-atendido">🚫 Não Atendeu</option><option value="reagendado">🔄 Reagendado</option><option value="conveniente">🟢 Conveniente</option><option value="cancelamento-do-contrato">❌ Cancelado</option><option value="entregue">📬 Entregue</option><option value="entregue-d1">📬 Entregue D-1</option><option value="entregue-d0">📬 Entregue D-0</option><option value="entregue-pos">📬 Entregue Pós</option><option value="normalizado">✅ Normalizado</option><option value="resolvido">✅ Resolvido</option><option value="aberto-reparo">🔧 Aberto Reparo</option><option value="problema-aberto">🔧 Problema Aberto</option><option value="problema-na-rede">🌐 Problema na Rede</option><option value="central">🏢 Central</option><option value="agendado">📅 Agendado</option><option value="suspenso-por-debito">💰 Suspenso por Débito</option><option value="numero-nao-pertence">❓ Número Não Pertence</option><option value="area-de-risco">⚠️ Área de Risco</option><option value="nao-se-encontra">🏠 Não se Encontra</option><option value="solicitou-upgrade">⬆️ Solicitou Upgrade</option><option value="sem-contato">📴 Sem Contato</option><option value="sem-retorno-supervisao">⏳ Sem Retorno Supervisão</option><option value="bloqueado">🚫 Bloqueado</option>';
       }}else{{
-        sel.innerHTML='<option value="pendente">⏳ Pendente</option><option value="confirmado">✅ Confirmado</option><option value="nao-atendido">🚫 Não Atendeu</option><option value="reagendado">🔄 Reagendado</option><option value="conveniente">🟢 Conveniente</option><option value="cancelamento-do-contrato">❌ Cancelado</option><option value="entregue">📬 Entregue</option><option value="entregue-d1">📬 Entregue D-1</option><option value="entregue-d0">📬 Entregue D-0</option><option value="entregue-pos">📬 Entregue Pós</option><option value="normalizado">✅ Normalizado</option><option value="resolvido">✅ Resolvido</option><option value="aberto-reparo">🔧 Aberto Reparo</option><option value="problema-na-rede">🌐 Problema na Rede</option><option value="central">🏢 Central</option><option value="agendado">📅 Agendado</option><option value="suspenso-por-debito">💰 Suspenso por Débito</option><option value="numero-nao-pertence">❓ Número Não Pertence</option><option value="area-de-risco">⚠️ Área de Risco</option><option value="nao-se-encontra">🏠 Não se Encontra</option><option value="solicitou-upgrade">⬆️ Solicitou Upgrade</option><option value="sem-contato">📴 Sem Contato</option><option value="sem-retorno-supervisao">⏳ Sem Retorno Supervisão</option>';
+        sel.innerHTML='<option value="pendente">⏳ Pendente</option><option value="confirmado">✅ Confirmado</option><option value="nao-atendido">🚫 Não Atendeu</option><option value="reagendado">🔄 Reagendado</option><option value="conveniente">🟢 Conveniente</option><option value="cancelamento-do-contrato">❌ Cancelado</option><option value="entregue">📬 Entregue</option><option value="entregue-d1">📬 Entregue D-1</option><option value="entregue-d0">📬 Entregue D-0</option><option value="entregue-pos">📬 Entregue Pós</option><option value="normalizado">✅ Normalizado</option><option value="resolvido">✅ Resolvido</option><option value="aberto-reparo">🔧 Aberto Reparo</option><option value="problema-aberto">🔧 Problema Aberto</option><option value="problema-na-rede">🌐 Problema na Rede</option><option value="central">🏢 Central</option><option value="agendado">📅 Agendado</option><option value="suspenso-por-debito">💰 Suspenso por Débito</option><option value="numero-nao-pertence">❓ Número Não Pertence</option><option value="area-de-risco">⚠️ Área de Risco</option><option value="nao-se-encontra">🏠 Não se Encontra</option><option value="solicitou-upgrade">⬆️ Solicitou Upgrade</option><option value="sem-contato">📴 Sem Contato</option><option value="sem-retorno-supervisao">⏳ Sem Retorno Supervisão</option><option value="bloqueado">🚫 Bloqueado</option>';
       }}
       sel.value=waGetStatus(c);
     }}
@@ -1080,6 +1230,133 @@ def gerar_whatsapp_agenda_html(backend_url="https://svoboda.rtflowapp.com/api/ag
     }}).catch(function(){{}});
   }}
 
+
+  // ========== FLUXO AUTOMÁTICO DE RESPOSTAS ==========
+  var FLOW_API = '/api/flow';
+  var _fluxoAtivos = [];
+  var _fluxoPollTimer = null;
+
+  function waFluxoLoadConfig() {{
+    fetch(FLOW_API + '/flow-config').then(function(r){{return r.json()}}).then(function(cfg){{
+      var chk = document.getElementById('fluxo-ativo');
+      if (chk) chk.checked = !!cfg.ativo;
+      if (cfg.msg_sim)   document.getElementById('fluxo-msg-sim').value  = cfg.msg_sim;
+      if (cfg.msg_nao)   document.getElementById('fluxo-msg-nao').value  = cfg.msg_nao;
+      if (cfg.msg_outro) document.getElementById('fluxo-msg-outro').value = cfg.msg_outro;
+      if (cfg.delay_segundos !== undefined) document.getElementById('fluxo-delay').value = cfg.delay_segundos;
+    }}).catch(function(){{}});
+    waFluxoLoadAtivos();
+  }}
+
+  function waFluxoToggle(ativo) {{
+    var cfg = {{ ativo: ativo }};
+    fetch(FLOW_API + '/flow-config', {{method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify(cfg)}}).catch(function(){{}});
+  }}
+
+  function waFluxoSaveConfig() {{
+    if (!WA_BACKEND) {{ alert('Configure o backend na aba Configuração primeiro'); return; }}
+    var cfg = {{
+      ativo:          document.getElementById('fluxo-ativo').checked,
+      delay_segundos: parseInt(document.getElementById('fluxo-delay').value) || 10,
+      wa_backend:     WA_BACKEND,
+      wa_key:         WA_KEY || '',
+      msg_sim:        document.getElementById('fluxo-msg-sim').value.trim(),
+      msg_nao:        document.getElementById('fluxo-msg-nao').value.trim(),
+      msg_outro:      document.getElementById('fluxo-msg-outro').value.trim()
+    }};
+    fetch(FLOW_API + '/flow-config', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify(cfg)
+    }}).then(function(r){{return r.json()}}).then(function(d){{
+      if (d.ok) {{
+        var m = document.getElementById('fluxo-save-msg');
+        if (m) {{ m.style.display = 'block'; setTimeout(function(){{m.style.display='none'}}, 2500); }}
+      }}
+    }}).catch(function(e){{ alert('Erro ao salvar: ' + e.message); }});
+  }}
+
+  function waFluxoLoadAtivos() {{
+    fetch(FLOW_API + '/flows').then(function(r){{return r.json()}}).then(function(flows){{
+      _fluxoAtivos = flows;
+      waFluxoRenderTabela(flows);
+    }}).catch(function(){{}});
+    fetch(FLOW_API + '/status').then(function(r){{return r.json()}}).then(function(s){{
+      document.getElementById('fluxo-cnt-aguardando').textContent  = s.aguardando  || 0;
+      document.getElementById('fluxo-cnt-respondidos').textContent = s.respondidos || 0;
+      document.getElementById('fluxo-cnt-cancelados').textContent  = s.cancelados  || 0;
+    }}).catch(function(){{}});
+  }}
+
+  function waFluxoRenderTabela(flows) {{
+    var tbody = document.getElementById('fluxo-tbody');
+    var tabela = document.getElementById('fluxo-table');
+    var empty  = document.getElementById('fluxo-empty');
+    if (!tbody) return;
+    if (!flows || flows.length === 0) {{
+      if (tabela) tabela.style.display = 'none';
+      if (empty)  empty.style.display  = 'block';
+      return;
+    }}
+    if (tabela) tabela.style.display = 'table';
+    if (empty)  empty.style.display  = 'none';
+
+    var BADGE = {{
+      'aguardando':  '<span style="background:rgba(251,191,36,.15);color:#fbbf24;border:1px solid rgba(251,191,36,.3);border-radius:4px;padding:2px 7px;font-size:10px">⏳ Aguardando</span>',
+      'respondido':  '<span style="background:rgba(37,211,102,.15);color:#25d366;border:1px solid rgba(37,211,102,.3);border-radius:4px;padding:2px 7px;font-size:10px">✅ Respondido</span>',
+      'cancelado':   '<span style="background:rgba(100,116,139,.15);color:#94a3b8;border:1px solid rgba(100,116,139,.3);border-radius:4px;padding:2px 7px;font-size:10px">🚫 Cancelado</span>'
+    }};
+    var html = '';
+    var recentes = flows.slice().reverse().slice(0, 100);
+    recentes.forEach(function(fl) {{
+      var badge  = BADGE[fl.status] || fl.status;
+      var nome   = fl.nome || fl.phone || '';
+      var resp   = fl.resposta_recebida ? ('"' + fl.resposta_recebida.substring(0, 30) + '"') : '—';
+      var cls    = fl.classificacao === 'sim' ? '#25d366' : fl.classificacao === 'nao' ? '#ff4d6d' : '#94a3b8';
+      html += '<tr style="border-bottom:1px solid rgba(28,34,55,.5)">';
+      html += '<td style="padding:5px 6px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + nome + '">' + nome + '</td>';
+      html += '<td style="padding:5px 6px">' + badge + '</td>';
+      html += '<td style="padding:5px 6px;color:' + cls + '">' + resp + '</td>';
+      html += '<td style="padding:5px 6px;text-align:center">';
+      if (fl.status === 'aguardando') {{
+        html += '<button onclick="waFluxoCancelar(\'' + fl.id + '\')" style="background:none;border:1px solid #ff4d6d33;color:#ff4d6d;border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer">Cancelar</button>';
+      }}
+      html += '</td>';
+      html += '</tr>';
+    }});
+    tbody.innerHTML = html;
+  }}
+
+  function waFluxoCancelar(id) {{
+    fetch(FLOW_API + '/flows/' + id, {{method:'DELETE'}}).then(function(){{
+      waFluxoLoadAtivos();
+    }}).catch(function(){{}});
+  }}
+
+  function waFluxoLimpar() {{
+    if (!confirm('Remover todos os fluxos concluídos e cancelados?')) return;
+    fetch(FLOW_API + '/flows', {{method:'DELETE'}}).then(function(){{
+      waFluxoLoadAtivos();
+    }}).catch(function(){{}});
+  }}
+
+  function waFluxoRegistrar(clientes) {{
+    // Registra fluxos no servidor após disparo
+    var ativo = document.getElementById('fluxo-ativo');
+    if (!ativo || !ativo.checked) return;
+    var agora = new Date().toISOString();
+    var payload = clientes.map(function(c) {{
+      return {{ phone: c.phone, nome: c.nome || '', enviado_em: agora }};
+    }});
+    fetch(FLOW_API + '/flows', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify(payload)
+    }}).then(function(){{
+      setTimeout(waFluxoLoadAtivos, 1000);
+    }}).catch(function(){{}});
+  }}
+
   function waFireDisparo(){{
     var tpls=waGetTemplates();
     if(!tpls.length){{alert('Preencha pelo menos a Mensagem 1');return}}
@@ -1105,7 +1382,9 @@ def gerar_whatsapp_agenda_html(backend_url="https://svoboda.rtflowapp.com/api/ag
     document.getElementById('wa-fire-btn').disabled=true;
     document.getElementById('wa-progress').style.display='block';
     var h={{'Content-Type':'application/json'}};if(WA_KEY)h['x-api-key']=WA_KEY;h['x-wa-instance']=inst;
-    fetch(WA_BACKEND+'/send-bulk?apikey='+(WA_KEY||''),{{method:'POST',headers:h,body:JSON.stringify(body)}}).catch(function(){{}});
+    fetch(WA_BACKEND+'/send-bulk?apikey='+(WA_KEY||''),{{method:'POST',headers:h,body:JSON.stringify(body)}}).then(function(){{
+      waFluxoRegistrar(selC);
+    }}).catch(function(){{}});
     var sent=0;
     var iv=setInterval(function(){{
       sent++;
@@ -1280,7 +1559,13 @@ def gerar_whatsapp_agenda_html(backend_url="https://svoboda.rtflowapp.com/api/ag
       }} else {{
         _chatAllConversations = _chatConversations.slice();
       }}
-      chatRenderContacts(_chatAllConversations);
+      // Só renderiza a lista se não houver busca sintética ativa
+      var _sq2 = (document.getElementById('chat-search-input') || {{}}).value || '';
+      if (_sq2.trim() && _chatSyntheticList) {{
+        _chatRenderSynthetic(_chatSyntheticList, _sq2.trim().toLowerCase());
+      }} else {{
+        chatRenderContacts(_chatAllConversations);
+      }}
       _chatLoadingMore = false;
     }} catch(e) {{
       document.getElementById('chat-sidebar-count').textContent = 'Erro ao carregar';
@@ -1315,19 +1600,86 @@ def gerar_whatsapp_agenda_html(backend_url="https://svoboda.rtflowapp.com/api/ag
         }}
       }}
     }}
-    // 2. Fallback: cache localStorage
     var cache = JSON.parse(localStorage.getItem('wa_nome_cache') || '{{}}');
     return cache[clean.slice(-8)] || '';
   }}
+  // Busca phones em waClients e cache pelo nome (abordagem inversa: nome → phone → conversa)
+  function _chatFindPhonesByName(query) {{
+    var phones = new Set();
+    if (typeof waClients !== 'undefined') {{
+      for (var i = 0; i < waClients.length; i++) {{
+        if ((waClients[i].nome || '').toLowerCase().includes(query)) {{
+          var p = (waClients[i].phone || '').replace(/\D/g, '');
+          if (p) phones.add(p.slice(-8));
+        }}
+      }}
+    }}
+    try {{
+      var cache = JSON.parse(localStorage.getItem('wa_nome_cache') || '{{}}');
+      Object.keys(cache).forEach(function(k) {{
+        if ((cache[k] || '').toLowerCase().includes(query)) phones.add(k);
+      }});
+    }} catch(e) {{}}
+    return phones;
+  }}
+
+  // ── Helper: extrai chave de deduplicação (DDD + 8 últimos dígitos) ──
+  function _chatDedupKey(phone) {{
+    var clean = (phone || '').replace(/\D/g, '');
+    if (clean.length >= 12 && clean.indexOf('55') === 0) {{
+      return clean.substring(2, 4) + clean.slice(-8);
+    }}
+    return clean;
+  }}
+
+  // ── Deduplicação: unifica contatos com/sem 9° dígito na sidebar ──
+  function _chatDeduplicateList(list) {{
+    var deduped = [];
+    var seen = {{}};
+    for (var i = 0; i < list.length; i++) {{
+      var c = list[i];
+      var dk = _chatDedupKey(c.phone);
+      if (seen[dk] !== undefined) {{
+        // Já existe — mantém o com lastTs mais recente, soma unreads
+        var idx = seen[dk];
+        var existing = deduped[idx];
+        if ((c.lastTs || 0) > (existing.lastTs || 0)) {{
+          c.unread = (c.unread || 0) + (existing.unread || 0);
+          deduped[idx] = c;
+        }} else {{
+          existing.unread = (existing.unread || 0) + (c.unread || 0);
+        }}
+      }} else {{
+        seen[dk] = deduped.length;
+        deduped.push(c);
+      }}
+    }}
+    return deduped;
+  }}
+
   function chatRenderContacts(list) {{
     var q = (document.getElementById('chat-search-input') || {{}}).value || '';
     q = q.trim().toLowerCase();
     var qDigits = q.replace(/\D/g, '');
     var filtered = list;
+    // Busca por nome: primeiro acha os phones em waClients/cache, depois filtra conversas
+    var _namePhones = (q && !qDigits) ? _chatFindPhonesByName(q) : new Set();
     if (q) filtered = list.filter(function(c) {{
-      var nome = _chatGetNomeByPhone(c.phone).toLowerCase();
-      return nome.includes(q) || (qDigits && c.phone.includes(qDigits));
+      var phoneClean = (c.phone || '').replace(/\D/g, '');
+      // 1. Match pelo index nome→phone (busca inversa, mais confiável)
+      if (_namePhones.size > 0 && _namePhones.has(phoneClean.slice(-8))) return true;
+      // 2. Match pelo nome resolvido da conversa
+      var nome = (_chatGetNomeByPhone(c.phone) || '').toLowerCase();
+      if (nome && nome.includes(q)) return true;
+      // 3. Match por número digitado
+      if (qDigits && phoneClean.includes(qDigits)) return true;
+      // 4. Match pela última mensagem
+      if ((c.lastMessage || '').toLowerCase().includes(q)) return true;
+      return false;
     }});
+
+    // ── Deduplicação: remove contatos com/sem 9° dígito duplicados ──
+    filtered = _chatDeduplicateList(filtered);
 
     var countText = filtered.length + ' conversa(s)';
     if (_chatTotalPages > 1) countText += ' • carregadas ' + _chatCurrentPage + '/' + _chatTotalPages + ' pág';
@@ -1342,7 +1694,7 @@ def gerar_whatsapp_agenda_html(backend_url="https://svoboda.rtflowapp.com/api/ag
       var fromIcon = c.lastFrom === 'me' ? '↩ ' : '';
       var unreadHtml = c.unread > 0 ? '<div class="chat-unread-badge">' + c.unread + '</div>' : '';
       var initials = c.phone.slice(-2);
-      html += '<div class="chat-contact' + (isActive ? ' active' : '') + '" onclick="chatOpenConversation(\\'' + c.phone + '\\')">';
+      html += '<div class="chat-contact' + (isActive ? ' active' : '') + '" onclick="chatOpenConversation(\\\'' + c.phone + '\\\')">'; 
       html += '<div class="chat-contact-avatar">' + initials + '</div>';
       html += '<div class="chat-contact-info">';
       var _cn = _chatGetNomeByPhone(c.phone);
@@ -1359,7 +1711,10 @@ def gerar_whatsapp_agenda_html(backend_url="https://svoboda.rtflowapp.com/api/ag
     if (_chatCurrentPage < _chatTotalPages) {{
       html += '<div id="chat-load-more" style="text-align:center;padding:12px;font-size:11px;color:#475569">⬇ Scroll para carregar mais</div>';
     }}
-    document.getElementById('chat-contact-list').innerHTML = html || '<div style="text-align:center;padding:30px;color:#475569;font-size:12px">Nenhuma conversa encontrada</div>';
+    var _emptyMsg = q
+      ? '<div style="text-align:center;padding:30px;color:#475569;font-size:12px">🔍 Nenhum resultado para "' + q + '"</div>'
+      : '<div style="text-align:center;padding:30px;color:#475569;font-size:12px">Nenhuma conversa encontrada</div>';
+    document.getElementById('chat-contact-list').innerHTML = html || _emptyMsg;
 
     // Scroll infinito — carregar mais conversas ao chegar no final
     var contactList = document.getElementById('chat-contact-list');
@@ -1374,28 +1729,154 @@ def gerar_whatsapp_agenda_html(backend_url="https://svoboda.rtflowapp.com/api/ag
   }}
 
   var _chatSearchDebounce = null;
+  var _chatSyntheticList = null;
+  var _chatExportCache = null;
+  var _chatExportCacheTs = 0;
+
   function chatFilterContacts() {{
     var q = (document.getElementById('chat-search-input') || {{}}).value || '';
     q = q.trim();
     if (!q) {{
-      // Empty search: show the normal paginated list
+      _chatSyntheticList = null;
       chatRenderContacts(_chatAllConversations);
       return;
     }}
-    // When searching: load ALL conversations from backend to filter properly
+    // 1. Filtro imediato nos dados já carregados
+    chatRenderContacts(_chatAllConversations);
+    // 2. Debounce: busca no export-full para cobrir TODAS as páginas
     clearTimeout(_chatSearchDebounce);
     _chatSearchDebounce = setTimeout(async function() {{
       if (!_chatEnsureBackend()) return;
+      var qL = q.toLowerCase();
+      var qDigitsAll = qL.replace(/\D/g, '');
+      var el = document.getElementById('chat-sidebar-count');
       try {{
-        document.getElementById('chat-sidebar-count').textContent = '🔍 Buscando...';
-        var r = await fetch(WA_BACKEND + '/conversations?apikey=' + WA_KEY + '&page=1&limit=2000');
-        var data = await r.json();
-        var allConvs = data.conversations || data || [];
-        chatRenderContacts(allConvs);
+        el.textContent = '🔍 Buscando...';
+
+        // ── Busca por nome: usa export-full (tem TODOS os clientes) ──────────
+        if (!qDigitsAll) {{
+          var now = Date.now();
+          if (!_chatExportCache || (now - _chatExportCacheTs) > 300000) {{
+            try {{
+              var expR = await fetch(WA_BACKEND + '/export-full?apikey=' + (WA_KEY || ''));
+              _chatExportCache = await expR.json();
+              _chatExportCacheTs = now;
+            }} catch(e2) {{ _chatExportCache = []; }}
+          }}
+
+          // Acha clientes que batem com o nome
+          var matchClients = [];
+          if (Array.isArray(_chatExportCache)) {{
+            _chatExportCache.forEach(function(c) {{
+              if ((c.nome || '').toLowerCase().includes(qL)) matchClients.push(c);
+            }});
+          }}
+          // Também adiciona do waClients local
+          if (typeof waClients !== 'undefined') {{
+            waClients.forEach(function(c) {{
+              if ((c.nome || '').toLowerCase().includes(qL)) {{
+                var jaEsta = matchClients.some(function(mc) {{
+                  return (mc.phone||'').replace(/\D/g,'').slice(-8) === (c.phone||'').replace(/\D/g,'').slice(-8);
+                }});
+                if (!jaEsta) matchClients.push(c);
+              }}
+            }});
+          }}
+
+          // Verifica cache localStorage (wa_nome_cache): chave=ultimos8, valor=nome
+          try {{
+            var noCache = JSON.parse(localStorage.getItem('wa_nome_cache') || '{{}}');
+            Object.keys(noCache).forEach(function(k8) {{
+              if ((noCache[k8] || '').toLowerCase().includes(qL)) {{
+                var jaEsta2 = matchClients.some(function(mc) {{
+                  return (mc.phone||'').replace(/\\D/g,'').slice(-8) === k8;
+                }});
+                if (!jaEsta2) matchClients.push({{ nome: noCache[k8], phone: k8, status: '', _fromCache: true }});
+              }}
+            }});
+          }} catch(ec) {{}}
+
+          if (matchClients.length === 0) {{
+            el.textContent = '🔍 Nenhum resultado para "' + q + '"';
+            document.getElementById('chat-contact-list').innerHTML =
+              '<div style="text-align:center;padding:30px;color:#475569;font-size:12px">🔍 Nenhum cliente encontrado com esse nome.<br><span style="font-size:11px;margin-top:4px;display:block">Tente buscar pelo número de telefone.</span></div>';
+            return;
+          }}
+
+          // Cria entradas sintéticas para mostrar na sidebar
+          // (independe de qual página da conversa eles estão)
+          var syntheticConvs = matchClients.map(function(c) {{
+            var phone = (c.phone || '').replace(/\D/g, '');
+            if (phone && !phone.startsWith('55') && phone.length <= 11) phone = '55' + phone;
+            return {{
+              phone: phone,
+              lastMessage: c.status ? '📋 Status: ' + c.status : '📋 Clique para abrir conversa',
+              lastTs: null,
+              unread: 0,
+              lastFrom: '',
+              _synthetic: true,
+              _nome: c.nome
+            }};
+          }});
+
+          el.textContent = matchClients.length + ' cliente(s) encontrado(s)';
+          // Renderiza as entradas sintéticas diretamente
+          _chatRenderSynthetic(syntheticConvs, qL);
+          return;
+        }}
+
+        // ── Busca por número: filtra nas conversas carregadas ────────────────
+        var convR = await fetch(WA_BACKEND + '/conversations?apikey=' + WA_KEY + '&page=1&limit=2000');
+        var convData = await convR.json();
+        var allConvs = convData.conversations || convData || [];
+        // Filtra manualmente para detectar 0 resultados
+        var matched = allConvs.filter(function(c) {{
+          return (c.phone || '').replace(/\D/g, '').includes(qDigitsAll);
+        }});
+        if (matched.length === 0 && qDigitsAll.length >= 8) {{
+          // Não encontrado nas conversas carregadas (pode estar em outra página)
+          // Cria acesso direto pelo número digitado
+          var dPhone = qDigitsAll;
+          if (!dPhone.startsWith('55') && dPhone.length <= 11) dPhone = '55' + dPhone;
+          var synth = [{{
+            phone: dPhone,
+            lastMessage: '📞 Clique para abrir conversa diretamente',
+            lastTs: null, unread: 0, lastFrom: '', _synthetic: true,
+            _nome: _chatFormatPhone(dPhone)
+          }}];
+          el.textContent = '1 resultado - acesso direto pelo número';
+          _chatRenderSynthetic(synth, qL);
+        }} else {{
+          chatRenderContacts(allConvs);
+        }}
+
       }} catch(e) {{
         chatRenderContacts(_chatAllConversations);
       }}
-    }}, 400);
+    }}, 500);
+  }}
+
+  function _chatRenderSynthetic(list, q) {{
+    list = _chatDeduplicateList(list);
+    _chatSyntheticList = list;
+    var html = '';
+    for (var i = 0; i < list.length; i++) {{
+      var c = list[i];
+      var nome = c._nome || _chatGetNomeByPhone(c.phone) || _chatFormatPhone(c.phone);
+      var preview = c.lastMessage || '';
+      var initials = (c.phone || '').slice(-2);
+      html += '<div class="chat-contact" onclick="chatOpenConversation(\\'' + c.phone + '\\')">';
+      html += '<div class="chat-contact-avatar">' + initials + '</div>';
+      html += '<div class="chat-contact-info">';
+      html += '<div class="chat-contact-name">' + nome + '</div>';
+      html += '<div class="chat-contact-phone">' + _chatFormatPhone(c.phone) + '</div>';
+      html += '<div class="chat-contact-preview">' + preview.replace(/</g,'&lt;').substring(0,50) + '</div>';
+      html += '</div>';
+      html += '<div class="chat-contact-meta"><div class="chat-contact-time">→</div></div>';
+      html += '</div>';
+    }}
+    document.getElementById('chat-contact-list').innerHTML = html ||
+      '<div style="text-align:center;padding:30px;color:#475569;font-size:12px">Nenhuma conversa encontrada</div>';
   }}
 
   async function chatOpenConversation(phone) {{
@@ -1411,7 +1892,13 @@ def gerar_whatsapp_agenda_html(backend_url="https://svoboda.rtflowapp.com/api/ag
     document.getElementById('chat-main-phone').textContent = nome ? '' : phone;
     document.getElementById('chat-main-avatar').textContent = phone.slice(-2);
 
-    chatRenderContacts(_chatConversations);
+    // Se há busca ativa com lista sintética, mantém a sidebar correta
+    var _sq = (document.getElementById('chat-search-input') || {{}}).value || '';
+    if (_sq.trim() && _chatSyntheticList) {{
+      _chatRenderSynthetic(_chatSyntheticList, _sq.trim().toLowerCase());
+    }} else {{
+      chatRenderContacts(_chatConversations);
+    }}
     await chatLoadMessages();
 
     clearInterval(_chatPollTimer);
@@ -1613,7 +2100,19 @@ def gerar_whatsapp_agenda_html(backend_url="https://svoboda.rtflowapp.com/api/ag
       clearInterval(_chatPollTimer);
       clearInterval(_chatListPollTimer);
     }}
+    if (id === 'wa-disparo') {{
+      waFluxoLoadConfig();
+      clearInterval(_fluxoPollTimer);
+      _fluxoPollTimer = setInterval(waFluxoLoadAtivos, 30000);
+    }} else {{
+      clearInterval(_fluxoPollTimer);
+    }}
+    if (id === 'wa-config') {{
+      // Auto-testa conexão ao abrir a aba Configuração
+      setTimeout(function() {{ if(WA_BACKEND) waTestConnection(); }}, 300);
+    }}
   }};
+
 
   async function tplDelete(name) {{
   if (!confirm('Excluir o template "' + name + '"?')) return;
@@ -1658,6 +2157,47 @@ def gerar_whatsapp_agenda_html(backend_url="https://svoboda.rtflowapp.com/api/ag
       btn.textContent='📊 Exportar Completo';btn.disabled=false;
     }}).catch(function(e){{alert('Erro: '+e.message);btn.textContent='📊 Exportar Completo';btn.disabled=false}});
   }}
+
+  // ── BUTTON CONFIG: Load/Save das respostas dos botões ──
+  (function(){{
+    var BCFG_MAP = {{
+      'sim, confirmo':         'bcfg-sim-confirmo',
+      'preciso reagendar':     'bcfg-preciso-reagendar',
+      'cancelar':              'bcfg-cancelar',
+      'agendar':               'bcfg-agendar',
+      'ja devolvi':            'bcfg-ja-devolvi',
+      'sim, tudo certo':       'bcfg-sim-tudo-certo',
+      'nao, tenho problema':   'bcfg-nao-tenho-problema',
+      'quero falar com alguem':'bcfg-quero-falar'
+    }};
+    var backend = localStorage.getItem('wa_backend') || '';
+    var key = localStorage.getItem('wa_key') || '';
+    if(!backend) return;
+    fetch(backend+'/button-config', {{headers:{{'x-api-key':key}}}})
+      .then(function(r){{return r.json()}})
+      .then(function(cfg){{
+        for(var btn in BCFG_MAP){{
+          var el = document.getElementById(BCFG_MAP[btn]);
+          if(el && cfg[btn]) el.value = cfg[btn];
+        }}
+      }}).catch(function(e){{console.log('btnCfg load err:', e)}});
+
+    window.btnCfgSave = function(){{
+      var payload = {{}};
+      for(var btn in BCFG_MAP){{
+        var el = document.getElementById(BCFG_MAP[btn]);
+        if(el && el.value.trim()) payload[btn] = el.value.trim();
+      }}
+      fetch(backend+'/button-config', {{
+        method:'POST',
+        headers:{{'Content-Type':'application/json','x-api-key':key}},
+        body: JSON.stringify(payload)
+      }}).then(function(r){{return r.json()}}).then(function(j){{
+        var st = document.getElementById('btn-cfg-status');
+        if(st){{st.style.display='block';st.textContent='✓ Salvo com sucesso!';setTimeout(function(){{st.style.display='none'}},3000)}}
+      }}).catch(function(e){{alert('Erro ao salvar: '+e.message)}});
+    }};
+  }})();
 
   </script>
 </div>
