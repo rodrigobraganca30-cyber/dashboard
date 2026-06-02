@@ -17,7 +17,7 @@ app.use(express.static(path.join(__dirname, '..', 'frontend')));
 // ──────────────────────────────────────────────
 // AUTH MIDDLEWARE — API Key
 // ──────────────────────────────────────────────
-const API_KEY = process.env.AGENDA_API_KEY || 'svoboda-agenda-2025';
+const API_KEY = process.env.AGENDA_API_KEY;
 function authMiddleware(req, res, next) {
   // Skip auth for health, webhook, static files, and frontend requests (same-origin)
   if (req.path === '/health' || req.path === '/webhook' || req.path === '/' || req.path.endsWith('.html') || req.path.endsWith('.js') || req.path.endsWith('.css') || req.path.endsWith('.ico') || req.headers.referer) {

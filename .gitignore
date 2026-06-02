@@ -34,3 +34,5 @@ scratch/
 *.bak*
 *.log
 __pycache__/
+
+.env
