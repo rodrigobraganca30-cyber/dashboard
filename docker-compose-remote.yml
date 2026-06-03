@@ -47,6 +47,8 @@ services:
       POSTGRES_USER: agenda_user
       POSTGRES_PASSWORD: svoboda2025
       POSTGRES_DB: agenda
+    ports:
+      - "127.0.0.1:5432:5432"
     volumes:
       - agenda_pgdata:/var/lib/postgresql/data
     networks:
