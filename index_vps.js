@@ -141,9 +141,25 @@ function cached(key, ttlMs, fn) {
 
 async function setStatus(clientId, status, obs = '') {
   await redis.set(KEY_STATUS(clientId), JSON.stringify({ status, obs, updatedAt: new Date().toISOString() }));
+  
+  // --- SHADOW WRITE ---
+  try {
+    if (process.env.DATABASE_URL) {
+      await pgPool.query(
+        'UPDATE clientes SET status_atual = $1, obs_status = $2, atualizado_em = CURRENT_TIMESTAMP WHERE id = $3', 
+        [status, obs, clientId]
+      );
+    }
+  } catch(e) { log('error', 'PG setStatus Error', {error: e.message}); }
 }
 
 async function getStatus(clientId) {
+  try {
+    if (process.env.DATABASE_URL) {
+      const { rows } = await pgPool.query('SELECT status_atual, obs_status, atualizado_em FROM clientes WHERE id = $1', [clientId]);
+      if (rows.length > 0) return { status: rows[0].status_atual, obs: rows[0].obs_status || '', updatedAt: rows[0].atualizado_em };
+    }
+  } catch(e) {}
   const v = await redis.get(KEY_STATUS(clientId));
   return v ? JSON.parse(v) : { status: 'pendente', obs: '', updatedAt: null };
 }
@@ -164,9 +180,27 @@ async function appendMsg(phone, msg) {
   // mantém últimas 200 mensagens
   if (msgs.length > 200) msgs.splice(0, msgs.length - 200);
   await redis.set(KEY_MSGS(phone), JSON.stringify(msgs));
+
+  // --- SHADOW WRITE ---
+  try {
+    if (process.env.DATABASE_URL) {
+      await pgPool.query(
+        'INSERT INTO mensagens (telefone, remetente, texto, timestamp, instancia, is_auto) VALUES ($1, $2, $3, $4, $5, $6)', 
+        [phone, msg.from, msg.text, msg.ts, msg.instance || null, msg.auto || false]
+      );
+    }
+  } catch(e) { log('error', 'PG appendMsg Error', {error: e.message}); }
 }
 
 async function getMsgs(phone) {
+  try {
+    if (process.env.DATABASE_URL) {
+      const { rows } = await pgPool.query('SELECT * FROM mensagens WHERE telefone = $1 ORDER BY timestamp ASC', [phone]);
+      if (rows.length > 0) {
+        return rows.map(r => ({ from: r.remetente, text: r.texto, ts: Number(r.timestamp), instance: r.instancia, auto: r.is_auto }));
+      }
+    }
+  } catch(e) {}
   const raw = await redis.get(KEY_MSGS(phone));
   return raw ? JSON.parse(raw) : [];
 }
@@ -445,23 +479,31 @@ app.delete('/meta/templates/:name', async (req, res) => {
 
 // ──────────────────────────────────────────────
 // DETECÇÃO AUTOMÁTICA DE STATUS POR PALAVRAS-CHAVE
-const KEYWORDS = {
-  'nao-atendido': [
-    'não posso', 'nao posso', 'impossível', 'impossivel', 'ocupado',
-    'não vou', 'nao vou', 'cancelar', 'cancela', 'desmarcar', 'não', 'nao'
-  ],
-  reagendado: [
-    'remarcar', 'reagendar', 'outro dia', 'outra data', 'mudar data',
-    'mudar horário', 'mudar horario', 'pode ser amanhã', 'pode ser amanha',
-    'outra hora', 'diferente', 'semana que vem'
-  ],
-  confirmado: [
-    'sim', 'confirmo', 'confirmado', 'ok', 'pode vir', 'pode sim', 'pode confirmar', 'certo', 'perfeito',
-    'tá bom', 'ta bom', 'tudo bem', 'estarei', 'estarei lá', 'estarei la',
-    'combinado', 'show', 'vou estar', 'ótimo', 'otimo', 'beleza',
-    'claro', 'com certeza', 'positivo', '👍', '✅'
-  ]
+// Carregado dinamicamente do PostgreSQL (tabela configuracoes)
+// ──────────────────────────────────────────────
+let KEYWORDS = {
+  'nao-atendido': ['nao posso', 'impossivel', 'ocupado', 'nao vou', 'cancelar', 'cancela', 'desmarcar', 'nao'],
+  reagendado: ['remarcar', 'reagendar', 'outro dia', 'outra data', 'mudar data', 'mudar horario', 'pode ser amanha', 'outra hora', 'diferente', 'semana que vem'],
+  confirmado: ['sim', 'confirmo', 'confirmado', 'ok', 'pode vir', 'pode sim', 'pode confirmar', 'certo', 'perfeito', 'ta bom', 'tudo bem', 'estarei', 'combinado', 'show', 'vou estar', 'otimo', 'beleza', 'claro', 'com certeza', 'positivo']
 };
+let BTN_STATUS_MAP_DYNAMIC = null;
+
+async function loadDynamicConfig() {
+  try {
+    if (!process.env.DATABASE_URL) return;
+    const { rows } = await pgPool.query('SELECT chave, valor FROM configuracoes');
+    for (const row of rows) {
+      if (row.chave === 'keywords_status') KEYWORDS = row.valor;
+      if (row.chave === 'btn_status_map') BTN_STATUS_MAP_DYNAMIC = row.valor;
+    }
+    log('info', 'Configurações dinâmicas carregadas do PostgreSQL');
+  } catch(e) {
+    log('error', 'Erro ao carregar configurações dinâmicas', { error: e.message });
+  }
+}
+// Carrega na inicialização e recarrega a cada 60s
+loadDynamicConfig();
+setInterval(loadDynamicConfig, 60000);
 
 function detectStatus(text) {
   const t = text.toLowerCase().trim();
@@ -909,6 +951,15 @@ app.post('/agenda/blacklist', async (req, res) => {
 
 app.get('/agenda/clients', async (req, res) => {
   try {
+    if (process.env.DATABASE_URL) {
+      const { rows } = await pgPool.query('SELECT * FROM clientes');
+      const format = rows.map(r => ({
+        id: r.id, nome: r.nome, telefone: r.telefone, data: r.data, cidade: r.cidade, 
+        horario: r.horario, endereco: r.endereco, tipo: r.tipo, fase: r.fase, 
+        status: r.status_atual !== 'pendente' ? r.status_atual : (r.status_ofs || 'Pendente')
+      }));
+      return res.json(format);
+    }
     const raw = await redis.get(KEY_CLIENTS);
     res.json(raw ? JSON.parse(raw) : []);
   } catch (e) {
@@ -1098,12 +1149,52 @@ app.get('/dashboard-summary', async (req, res) => {
 });
 
 // ──────────────────────────────────────────────
+// CONFIGURAÇÕES DINÂMICAS — API REST
+// ──────────────────────────────────────────────
+app.get('/config', async (req, res) => {
+  try {
+    if (process.env.DATABASE_URL) {
+      const { rows } = await pgPool.query('SELECT chave, valor, descricao, atualizado_em FROM configuracoes');
+      const config = {};
+      rows.forEach(r => config[r.chave] = { valor: r.valor, descricao: r.descricao, atualizado_em: r.atualizado_em });
+      return res.json(config);
+    }
+    res.json({});
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/config/:chave', async (req, res) => {
+  try {
+    if (process.env.DATABASE_URL) {
+      const { rows } = await pgPool.query('SELECT valor, descricao, atualizado_em FROM configuracoes WHERE chave = $1', [req.params.chave]);
+      if (rows.length) return res.json(rows[0]);
+    }
+    res.status(404).json({ error: 'Configuração não encontrada' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/config/:chave', async (req, res) => {
+  try {
+    if (!process.env.DATABASE_URL) return res.status(500).json({ error: 'DATABASE_URL não configurada' });
+    const { valor, descricao } = req.body;
+    await pgPool.query(
+      `INSERT INTO configuracoes (chave, valor, descricao) VALUES ($1, $2::jsonb, $3)
+       ON CONFLICT (chave) DO UPDATE SET valor = $2::jsonb, descricao = COALESCE($3, configuracoes.descricao), atualizado_em = CURRENT_TIMESTAMP`,
+      [req.params.chave, JSON.stringify(valor), descricao || null]
+    );
+    await loadDynamicConfig(); // Recarrega imediatamente
+    log('info', 'Configuração atualizada', { chave: req.params.chave });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ──────────────────────────────────────────────
 // BUTTON CONFIG — respostas automáticas por botão
 // ──────────────────────────────────────────────
 const KEY_BTN_CFG = 'agenda:button-config';
 
-// Mapeamento botão → status
-const BTN_STATUS_MAP = {
+// Mapeamento botão → status (fallback hardcoded, sobrescrito pelo PostgreSQL)
+const BTN_STATUS_MAP = BTN_STATUS_MAP_DYNAMIC || {
   'sim, confirmo':         'confirmado',
   'preciso reagendar':     'reagendado',
   'cancelar':              'nao-atendido',
