@@ -3,11 +3,23 @@ const express = require('express');
 const axios   = require('axios');
 const cors    = require('cors');
 const { createClient } = require('redis');
+const fs = require('fs');
 const path    = require('path');
+const { Pool } = require('pg');
 
 const app  = express();
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
+
+// ──────────────────────────────────────────────
+// POSTGRESQL POOL (Shadow Write)
+// ──────────────────────────────────────────────
+const pgPool = new Pool({
+  connectionString: process.env.DATABASE_URL
+});
+pgPool.on('error', (err) => {
+  log('error', 'PostgreSQL error', { error: err.message });
+});
 
 // ──────────────────────────────────────────────
 // SERVE FRONTEND STATIC (index.html)
@@ -918,6 +930,48 @@ app.post('/agenda/clients', async (req, res) => {
     
     const merged = Array.from(map.values());
     await redis.set(KEY_CLIENTS, JSON.stringify(merged));
+    
+    // --- SHADOW WRITE: Inserir no PostgreSQL ---
+    try {
+      if (process.env.DATABASE_URL) {
+        const client = await pgPool.connect();
+        try {
+          await client.query('BEGIN');
+          for (const c of newClients) {
+            const query = `
+              INSERT INTO clientes (id, nome, telefone, data, cidade, horario, endereco, tipo, fase, status_ofs, status_atual)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+              ON CONFLICT (id) DO UPDATE SET
+                nome = EXCLUDED.nome,
+                telefone = EXCLUDED.telefone,
+                data = EXCLUDED.data,
+                cidade = EXCLUDED.cidade,
+                horario = EXCLUDED.horario,
+                endereco = EXCLUDED.endereco,
+                tipo = EXCLUDED.tipo,
+                fase = EXCLUDED.fase,
+                status_ofs = EXCLUDED.status_ofs,
+                atualizado_em = CURRENT_TIMESTAMP;
+            `;
+            const values = [
+              c.id, c.nome, c.telefone, c.data, c.cidade, c.horario, c.endereco, c.tipo, c.fase, c.status || 'Pendente', 'pendente'
+            ];
+            await client.query(query, values);
+          }
+          await client.query('COMMIT');
+          log('info', `Shadow Write PostgreSQL: ${newClients.length} clientes inseridos.`);
+        } catch (e) {
+          await client.query('ROLLBACK');
+          log('error', 'Shadow Write PG Error', { error: e.message });
+        } finally {
+          client.release();
+        }
+      }
+    } catch (e) {
+      log('error', 'Shadow Write Pool Connection Error', { error: e.message });
+    }
+    // -------------------------------------------
+
     res.json({ ok: true, count: merged.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
