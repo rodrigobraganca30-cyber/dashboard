@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SVOBODA · Agenda Futura + WhatsApp</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@600;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+
+</head>
+<body>
+
+<!-- HEADER -->
+<div class="header">
+  <div class="logo">S <span>SVOBODA</span></div>
+  <div class="divider-h"></div>
+  <div class="header-title">📅 Agenda Futura <span class="badge">WhatsApp</span></div>
+  <div class="header-right">
+    <span class="conn-dot" id="conn-dot"></span>
+    <span class="conn-label" id="conn-label">Verificando...</span>
+    <button class="btn-primary" onclick="document.getElementById('csv-input').click()">⬆ CSV / Excel</button>
+    <input type="file" id="csv-input" accept=".csv,.xlsx,.xls,.ods,.tsv" onchange="handleFile(event)">
+  </div>
+</div>
+
+<!-- LAYOUT -->
+<div class="layout">
+
+  <!-- LEFT -->
+  <div class="left">
+
+    <!-- SUMMARY -->
+    <div class="summary" id="summary" style="display:none">
+      <div class="stat"><div class="stat-val c-total" id="s-total">0</div><div class="stat-lbl">Total</div></div>
+      <div class="stat"><div class="stat-val c-pend" id="s-pend">0</div><div class="stat-lbl">Pendente</div></div>
+      <div class="stat"><div class="stat-val c-conf" id="s-conf">0</div><div class="stat-lbl">Confirmado</div></div>
+      <div class="stat"><div class="stat-val c-nao" id="s-nao">0</div><div class="stat-lbl">Não Atendeu</div></div>
+      <div class="stat"><div class="stat-val c-reag" id="s-reag">0</div><div class="stat-lbl">Reagendado</div></div>
+    </div>
+
+    <!-- CONTROLS -->
+    <div class="controls" id="controls" style="display:none">
+      <select class="fsel" id="f-city" onchange="filterChanged()"><option value="">Todas cidades</option></select>
+      <select class="fsel" id="f-intervalo" onchange="filterChanged()"><option value="">Todos turnos</option></select>
+      <select class="fsel" id="f-status" onchange="filterChanged()">
+        <option value="">Todos status</option>
+        <option value="pendente">Pendente</option>
+        <option value="confirmado">Confirmado</option>
+        <option value="nao-atendido">Não Atendeu</option>
+        <option value="reagendado">Reagendado</option>
+      </select>
+      <input class="search" id="search" placeholder="🔍  Buscar cliente..." oninput="filterChanged()" onpaste="setTimeout(filterChanged,50)" onchange="filterChanged()">
+      <div class="sel-bar">
+        <span class="sel-count" id="sel-count">0 selecionados</span>
+        <button class="btn-sm" onclick="selectAll()">Todos</button>
+        <button class="btn-sm" onclick="selectNone()">Limpar</button>
+        <button class="btn-sm wa" onclick="openDisparo()">📱 Enviar WhatsApp</button>
+      </div>
+    </div>
+
+    <!-- TABLE -->
+    <div class="table-wrap" id="table-wrap">
+      <div class="empty-state" id="empty-state">
+        <div class="empty-icon">📅</div>
+        <div class="empty-title">Nenhuma agenda carregada</div>
+        <div class="empty-sub">Importe o CSV ou Excel da agenda futura do OFS para começar.</div>
+        <button class="btn-primary" style="margin-top:8px" onclick="document.getElementById('csv-input').click()">⬆ Importar arquivo</button>
+      </div>
+      <table class="client-table" id="client-table" style="display:none">
+        <thead>
+          <tr>
+            <th class="check-col"><input type="checkbox" id="check-all" onchange="toggleAll(this)"></th>
+            <th>Cliente</th>
+            <th>Telefone</th>
+            <th>Data</th>
+            <th>Intervalo</th>
+            <th>Endereço</th>
+            <th>Cidade</th>
+            <th>Status</th>
+            <th>WhatsApp</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+
+  </div><!-- /left -->
+
+  <!-- RIGHT — CHAT -->
+  <div class="right" id="right-panel">
+    <div class="no-chat" id="no-chat">
+      <div class="no-chat-icon">💬</div>
+      <div class="no-chat-txt">Clique em um cliente para ver a conversa no WhatsApp</div>
+    </div>
+    <div id="chat-panel" style="display:none;flex-direction:column;flex:1;overflow:hidden">
+      <div class="chat-header">
+        <div class="chat-avatar">👤</div>
+        <div class="chat-info">
+          <div class="chat-name" id="chat-name">—</div>
+          <div class="chat-details">
+            <div class="chat-detail-row" id="chat-phone">—</div>
+            <div class="chat-detail-row" id="chat-intervalo" style="color:var(--accent2)"></div>
+            <div class="chat-detail-row" id="chat-endereco"></div>
+          </div>
+        </div>
+        <div class="chat-status-badge">
+          <button class="sbadge pendente" id="chat-status-badge" onclick="cycleStatus()">
+            <span class="dot"></span><span id="chat-status-label">Pendente</span>
+          </button>
+        </div>
+      </div>
+      <div class="messages" id="messages"></div>
+      <div class="reply-area">
+        <div class="quick-status">
+          <span style="font-size:10px;color:var(--text3);font-family:'DM Mono',monospace;align-self:center">MARCAR:</span>
+          <button class="qs-btn conf" onclick="setActiveStatus('confirmado')">✅ Confirmado</button>
+          <button class="qs-btn nao" onclick="setActiveStatus('nao-atendido')">📵 Não Atendeu</button>
+          <button class="qs-btn reag" onclick="setActiveStatus('reagendado')">🔁 Reagendado</button>
+        </div>
+        <div class="reply-row">
+          <textarea class="reply-input" id="reply-input" placeholder="Responder via WhatsApp..." rows="1"
+            onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendReply()}"
+            oninput="autoResize(this)"></textarea>
+          <button class="btn-send" onclick="sendReply()">➤</button>
+        </div>
+      </div>
+    </div>
+  </div><!-- /right -->
+
+</div><!-- /layout -->
+
+<!-- DISPARO MODAL -->
+<div class="modal-overlay hidden" id="modal-disparo">
+  <div class="modal">
+    <button class="close-modal" onclick="closeDisparo()">✕</button>
+    <div class="modal-title">📱 Disparo em Massa</div>
+    <div class="modal-sub" id="disparo-sub">0 clientes selecionados</div>
+
+    <div class="form-row">
+      <div class="form-label">
+        Template da mensagem
+        <span>{{nome}}</span><span>{{data}}</span><span>{{cidade}}</span><span>{{intervalo}}</span><span>{{endereco}}</span>
+      </div>
+      <textarea class="form-ctrl" id="template-input" oninput="updatePreview()"
+        placeholder="Olá {{nome}}! Passando para confirmar seu agendamento de instalação de internet no dia {{data}} em {{cidade}}. Você confirma a presença? 😊"></textarea>
+    </div>
+
+    <div class="form-row">
+      <div class="form-label">Prévia (primeiro cliente)</div>
+      <div class="preview-box" id="preview-box">—</div>
+    </div>
+
+    <div class="form-row">
+      <div class="form-label">Intervalo entre mensagens (segundos)</div>
+      <div class="delay-row">
+        <input class="form-ctrl" id="delay-input" type="number" value="5" min="3" max="30">
+        <span style="font-size:11px;color:var(--text3)">recomendado: 5–10s para evitar bloqueio</span>
+      </div>
+    </div>
+
+    <div class="progress-wrap" id="progress-wrap">
+      <div class="progress-txt" id="progress-txt">Iniciando...</div>
+      <div class="progress-bar"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn-cancel" onclick="closeDisparo()">Cancelar</button>
+      <button class="btn-fire" id="btn-fire" onclick="fireDisparo()">
+        <span>🚀</span> Enviar para <span id="fire-count">0</span> clientes
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<script src="script.js"></script>
+
+</body>
+</html>
