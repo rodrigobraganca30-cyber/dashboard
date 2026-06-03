@@ -50,6 +50,58 @@ setInterval(syncAllStatus, 8000);
 checkBackend();
 
 // ──────────────────────────────────────────────
+// AUTO-LOAD — carrega clientes do PostgreSQL ao abrir
+// ──────────────────────────────────────────────
+async function autoLoadFromAPI() {
+  try {
+    const r = await fetch(`${BACKEND}/agenda/clients`);
+    if (!r.ok) return;
+    const data = await r.json();
+    if (!data.length) return;
+
+    // Mapear campos da API para o formato do frontend
+    const list = data.map(c => ({
+      id: c.id,
+      nome: c.nome || 'Cliente',
+      phone: c.phone || c.telefone || '',
+      data: c.data ? c.data.split('T')[0].split('-').reverse().join('/') : '',
+      cidade: c.cidade || '',
+      intervalo: c.intervalo || c.horario || '',
+      endereco: c.endereco || '',
+      tipo: c.tipo || '',
+      statusOfs: c.statusOfs || c.status_ofs || '',
+    }));
+
+    allClients = list;
+
+    // Preencher filtros de cidade
+    const cities = [...new Set(list.map(c => c.cidade).filter(Boolean))].sort();
+    const selCity = document.getElementById('f-city');
+    selCity.innerHTML = '<option value="">Todas cidades</option>' + cities.map(c => `<option value="${c}">${c}</option>`).join('');
+
+    // Preencher filtros de intervalo
+    const intervalos = [...new Set(list.map(c => c.intervalo).filter(Boolean))].sort();
+    const selInt = document.getElementById('f-intervalo');
+    selInt.innerHTML = '<option value="">Todos turnos</option>' + intervalos.map(v => `<option value="${v}">${v}</option>`).join('');
+
+    // Mostrar tabela
+    document.getElementById('empty-state').style.display = 'none';
+    document.getElementById('client-table').style.display = 'table';
+    document.getElementById('summary').style.display = 'grid';
+    document.getElementById('controls').style.display = 'flex';
+
+    syncAllStatus();
+    render();
+    showToast(`${list.length} agendamentos carregados do servidor`, 'success');
+  } catch (e) {
+    console.log('Auto-load falhou, aguardando upload manual:', e.message);
+  }
+}
+
+// Carrega automaticamente ao abrir
+autoLoadFromAPI();
+
+// ──────────────────────────────────────────────
 // FILE UPLOAD
 // ──────────────────────────────────────────────
 function handleFile(e) {
