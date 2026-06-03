@@ -1,7 +1,7 @@
 // ──────────────────────────────────────────────
-// CONFIG — aponte para seu backend
+// CONFIG — usa caminho relativo pelo NGINX proxy
 // ──────────────────────────────────────────────
-const BACKEND = 'http://187.77.240.87:3001'; // ← ALTERE AQUI
+const BACKEND = '/api/agenda';
 
 // ──────────────────────────────────────────────
 // STATE
