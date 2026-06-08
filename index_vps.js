@@ -9,7 +9,7 @@ const { Pool } = require('pg');
 // MÓDULOS EXTRAÍDOS (Fase 3)
 // ──────────────────────────────────────────────
 const { log } = require('./config/logger');
-const { redis, KEY_STATUS, KEY_MSGS, KEY_PHONE_ID, KEY_TEMPLATES, KEY_CAMPAIGNS, KEY_UNREAD, KEY_CLIENTS, scanKeys } = require('./config/redis');
+const { redis, KEY_STATUS, KEY_MSGS, KEY_PHONE_ID, KEY_TEMPLATES, KEY_CAMPAIGNS, KEY_UNREAD, KEY_CLIENTS, KEY_BTN_CFG, scanKeys } = require('./config/redis');
 const { validateAndCleanPhone } = require('./utils/phone');
 const { getMetaConfig, getMetaClient, withRetry, extractTemplateParams, sendTemplate, sendText, META_VERIFY_TOKEN } = require('./services/metaService');
 
@@ -320,6 +320,46 @@ async function loadDynamicConfig() {
 loadDynamicConfig();
 setInterval(loadDynamicConfig, 60000);
 
+// ──────────────────────────────────────────────
+// BLACKLIST HELPERS (Dual Write: Redis + PostgreSQL)
+// ──────────────────────────────────────────────
+async function blacklistAdd(phone, motivo = '') {
+  await redis.sAdd('agenda:blacklist', phone);
+  try {
+    if (process.env.DATABASE_URL) {
+      await pgPool.query(
+        'INSERT INTO blacklist (telefone, motivo) VALUES ($1, $2) ON CONFLICT (telefone) DO NOTHING',
+        [phone, motivo]
+      );
+    }
+  } catch(e) { log('error', 'PG blacklistAdd error', { error: e.message }); }
+}
+
+async function blacklistRemove(phone) {
+  await redis.sRem('agenda:blacklist', phone);
+  try {
+    if (process.env.DATABASE_URL) {
+      await pgPool.query('DELETE FROM blacklist WHERE telefone = $1', [phone]);
+    }
+  } catch(e) { log('error', 'PG blacklistRemove error', { error: e.message }); }
+}
+
+// Carrega blacklist do PostgreSQL para o Redis na inicialização
+async function syncBlacklistFromPG() {
+  try {
+    if (!process.env.DATABASE_URL) return;
+    const { rows } = await pgPool.query('SELECT telefone FROM blacklist');
+    if (rows.length > 0) {
+      const phones = rows.map(r => r.telefone);
+      await redis.sAdd('agenda:blacklist', phones);
+      log('info', `Blacklist sincronizada do PostgreSQL: ${rows.length} numeros carregados no Redis`);
+    }
+  } catch(e) {
+    log('error', 'Erro ao sincronizar blacklist do PostgreSQL', { error: e.message });
+  }
+}
+syncBlacklistFromPG();
+
 function detectStatus(text) {
   const t = text.toLowerCase().trim();
   
@@ -378,10 +418,10 @@ app.post('/status/:clientId', async (req, res) => {
         phone = '55' + phone;
       }
       if (status === 'numero-nao-pertence') {
-        await redis.sAdd('agenda:blacklist', phone);
+        await blacklistAdd(phone, 'Adicionado manualmente pelo painel');
         log('info', 'Numero adicionado a Blacklist manualmente pelo Painel', { phone, status });
       } else {
-        await redis.sRem('agenda:blacklist', phone);
+        await blacklistRemove(phone);
         log('info', 'Numero removido da Blacklist manualmente pelo Painel', { phone, status });
       }
     }
@@ -615,6 +655,22 @@ app.post('/send-bulk', async (req, res) => {
 
           await setStatus(c.id, 'entregue', 'Disparo em massa realizado');
 
+          // Carimbar data/hora do disparo no cliente (Redis + PG)
+          try {
+            const rawC = await redis.get(KEY_CLIENTS);
+            if (rawC) {
+              const allClients = JSON.parse(rawC);
+              const target = allClients.find(x => x.id === c.id);
+              if (target) {
+                target.data_disparo = new Date().toISOString();
+                await redis.set(KEY_CLIENTS, JSON.stringify(allClients));
+              }
+            }
+            if (process.env.DATABASE_URL) {
+              await pgPool.query('UPDATE clientes SET data_disparo = CURRENT_TIMESTAMP WHERE id = $1', [c.id]);
+            }
+          } catch(stampErr) { log('error', 'Erro ao carimbar data_disparo', { error: stampErr.message }); }
+
           success++;
           log('info', 'Enviado', { nome: c.nome, phone: number, instance, tplIdx: idx % tpls.length });
         } catch (e) {
@@ -637,7 +693,7 @@ app.post('/send-bulk', async (req, res) => {
           
           if (isValidationError || isMetaInvalidUser) {
             if (number && number.length >= 10) {
-              await redis.sAdd('agenda:blacklist', number);
+              await blacklistAdd(number, 'Falha de validacao: ' + e.message);
               log('info', 'Numero adicionado a Blacklist automaticamente devido a falha real', { number, error: e.message });
             }
           }
@@ -749,11 +805,11 @@ app.post('/agenda/blacklist', async (req, res) => {
     if (!number.startsWith('55') && number.length >= 10) number = '55' + number;
     
     if (action === 'add') {
-      await redis.sAdd('agenda:blacklist', number);
+      await blacklistAdd(number, 'Adicionado via API');
       log('info', 'Numero adicionado a Blacklist via API', { number });
       res.json({ ok: true, msg: 'Numero adicionado' });
     } else if (action === 'remove') {
-      await redis.sRem('agenda:blacklist', number);
+      await blacklistRemove(number);
       log('info', 'Numero removido da Blacklist via API', { number });
       res.json({ ok: true, msg: 'Numero removido' });
     } else {
@@ -766,26 +822,39 @@ app.post('/agenda/blacklist', async (req, res) => {
 
 app.get('/agenda/clients', async (req, res) => {
   try {
+    // Prioriza Redis (dados completos com telefone)
+    const raw = await redis.get(KEY_CLIENTS);
+    if (raw) {
+      const clients = JSON.parse(raw);
+      if (clients.length > 0) return res.json(clients);
+    }
+    // Fallback: PostgreSQL
     if (process.env.DATABASE_URL) {
       const { rows } = await pgPool.query('SELECT * FROM clientes');
       const format = rows.map(r => ({
         id: r.id, nome: r.nome, telefone: r.telefone, data: r.data, cidade: r.cidade, 
         horario: r.horario, endereco: r.endereco, tipo: r.tipo, fase: r.fase, 
+        fila: r.fila || 'CONFIRMACAO',
+        data_disparo: r.data_disparo || null,
         status: r.status_atual !== 'pendente' ? r.status_atual : (r.status_ofs || 'Pendente')
       }));
       return res.json(format);
     }
-    const raw = await redis.get(KEY_CLIENTS);
-    res.json(raw ? JSON.parse(raw) : []);
+    res.json([]);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
+
 app.post('/agenda/clients', async (req, res) => {
   try {
     const newClients = req.body.clients || [];
+    const globalFila = (req.body.fila || '').toUpperCase();
     if (!Array.isArray(newClients)) return res.status(400).json({ error: 'clients deve ser array' });
+    
+    // Etiqueta cada cliente: usa fila individual se já existe, senão usa global, senão CONFIRMACAO
+    newClients.forEach(c => { c.fila = (c.fila || globalFila || 'CONFIRMACAO').toUpperCase(); });
     
     const raw = await redis.get(KEY_CLIENTS);
     const existing = raw ? JSON.parse(raw) : [];
@@ -803,10 +872,13 @@ app.post('/agenda/clients', async (req, res) => {
         const client = await pgPool.connect();
         try {
           await client.query('BEGIN');
+          // Garante coluna fila e data_disparo existem
+          await client.query(`ALTER TABLE clientes ADD COLUMN IF NOT EXISTS fila VARCHAR(30) DEFAULT 'CONFIRMACAO'`);
+          await client.query(`ALTER TABLE clientes ADD COLUMN IF NOT EXISTS data_disparo TIMESTAMP`);
           for (const c of newClients) {
             const query = `
-              INSERT INTO clientes (id, nome, telefone, data, cidade, horario, endereco, tipo, fase, status_ofs, status_atual)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+              INSERT INTO clientes (id, nome, telefone, data, cidade, horario, endereco, tipo, fase, status_ofs, status_atual, fila)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
               ON CONFLICT (id) DO UPDATE SET
                 nome = EXCLUDED.nome,
                 telefone = EXCLUDED.telefone,
@@ -817,10 +889,11 @@ app.post('/agenda/clients', async (req, res) => {
                 tipo = EXCLUDED.tipo,
                 fase = EXCLUDED.fase,
                 status_ofs = EXCLUDED.status_ofs,
+                fila = EXCLUDED.fila,
                 atualizado_em = CURRENT_TIMESTAMP;
             `;
             const values = [
-              c.id, c.nome, c.telefone, c.data, c.cidade, c.horario, c.endereco, c.tipo, c.fase, c.status || 'Pendente', 'pendente'
+              c.id, c.nome, c.telefone, c.data, c.cidade, c.horario, c.endereco, c.tipo, c.fase, c.status || 'Pendente', 'pendente', c.fila
             ];
             await client.query(query, values);
           }
@@ -1019,6 +1092,7 @@ const BTN_STATUS_MAP = BTN_STATUS_MAP_DYNAMIC || {
   'nao, tenho problema':   'problema-aberto',
   'quero falar com alguem':'problema-aberto',
   'sim, pode vir':         'agendado',
+  'sim, pode realizar a retirada': 'confirmado',
   'não, preciso reagendar':'reagendado',
   'nao, preciso reagendar':'reagendado'
 };
@@ -1305,7 +1379,34 @@ app.post('/webhook', async (req, res) => {
             }
 
           } else if (change.value.statuses && change.value.statuses.length > 0) {
-            // Pode processar status de entrega futuramente
+            for (const status of change.value.statuses) {
+              if (status.status === 'failed') {
+                let phone = status.recipient_id;
+                if (phone) {
+                  if (!phone.startsWith('55')) phone = '55' + phone;
+
+                  const errors = status.errors || [];
+                  const err = errors[0] || {};
+                  const errCode = err.code || 0;
+                  const errMsg = err.message || 'Erro de entrega desconhecido';
+
+                  log('warn', 'Falha de entrega via Webhook', { phone, code: errCode, message: errMsg });
+
+                  const isInvalidUser = errCode === 131026 || (errMsg && errMsg.toLowerCase().includes('not a valid'));
+                  const isPolicyBlock = errCode === 131049 || errCode === 131031 || errCode === 131048;
+
+                  if (isInvalidUser || isPolicyBlock) {
+                    await blacklistAdd(phone, `Meta Webhook: Code ${errCode} - ${errMsg}`);
+                    log('info', 'Numero adicionado a Blacklist via Webhook', { phone, code: errCode });
+
+                    const clientId = await redis.get(KEY_PHONE_ID(phone));
+                    if (clientId) {
+                      await setStatus(clientId, 'numero-nao-pertence', `Falha Meta: ${errCode} - ${errMsg}`);
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }

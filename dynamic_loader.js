@@ -52,12 +52,22 @@
       }
     }
 
-    // Encapsular runFilter para corrigir subtitulos
+    // Encapsular runFilter para corrigir subtitulos e limpar legenda duplicada
     var _origRunFilter = window.runFilter;
     window.runFilter = function () {
       _origRunFilter.apply(this, arguments);
       fixSubtitles();
       fixPeriodo();
+
+      // Garantir que qualquer legenda fora do donut-wrap seja removida
+      var dw = document.querySelector('.donut-wrap');
+      if (dw) {
+        document.querySelectorAll('.donut-legend').forEach(function (leg) {
+          if (!dw.contains(leg)) {
+            leg.remove();
+          }
+        });
+      }
     };
 
     // Executar filtro com dados novos
@@ -65,9 +75,14 @@
     console.log('[DynLoader] OS: ' + window.rawOSData.length + ' registros carregados');
   }
 
+  function getKPIVal(el) {
+    if (!el) return 0;
+    var txt = el.textContent.trim().replace(/\./g, '');
+    return parseInt(txt) || 0;
+  }
+
   function fixSubtitles() {
-    var total = parseInt($('.kpi-value.blue') ? $('.kpi-value.blue').textContent : '0') || 0;
-    if (total === 0) return;
+    var total = getKPIVal($('.kpi-value.blue'));
 
     // Canceladas
     var vRed = $('.kpi-value.red');
@@ -78,8 +93,9 @@
         var label = card.querySelector('.kpi-label');
         if (label && label.textContent.indexOf('Cancelad') >= 0) {
           var sub = card.querySelector('.kpi-sub');
-          var val = parseInt(vRed.textContent) || 0;
-          if (sub) sub.textContent = (val / total * 100).toFixed(1) + '% do total';
+          var val = getKPIVal(vRed);
+          var pct = total > 0 ? (val / total * 100).toFixed(1) : '0.0';
+          if (sub) sub.textContent = pct + '% do total';
         }
       }
     }
@@ -92,8 +108,9 @@
         var label = card.querySelector('.kpi-label');
         if (label && label.textContent.indexOf('Conclu') >= 0) {
           var sub = card.querySelector('.kpi-sub');
-          var val = parseInt(vYellow.textContent) || 0;
-          if (sub) sub.textContent = (val / total * 100).toFixed(1) + '% do total';
+          var val = getKPIVal(vYellow);
+          var pct = total > 0 ? (val / total * 100).toFixed(1) : '0.0';
+          if (sub) sub.textContent = pct + '% do total';
         }
       }
     }
@@ -103,8 +120,9 @@
       var card = el.closest('.kpi-card');
       if (card) {
         var sub = card.querySelector('.kpi-sub');
-        var val = parseInt(el.textContent) || 0;
-        if (sub) sub.textContent = (val / total * 100).toFixed(1) + '% do total';
+        var val = getKPIVal(el);
+        var pct = total > 0 ? (val / total * 100).toFixed(1) : '0.0';
+        if (sub) sub.textContent = pct + '% do total';
       }
     });
   }

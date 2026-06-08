@@ -34,10 +34,12 @@ def _norm_status(s):
 # ═══════════════════════════════════════
 # 1. ATIVIDADES (O.S.)
 # ═══════════════════════════════════════
-caminho_os = os.path.join(PASTA, "ATIVIDADES DAS O.S.xlsx")
-# Fallback: no servidor VPS o arquivo fica em /opt/painel_robo/data/csv/
-if not os.path.exists(caminho_os):
+if sys.platform.startswith('linux'):
     caminho_os = "/opt/painel_robo/data/csv/ATIVIDADES DAS O.S.xlsx"
+    if not os.path.exists(caminho_os):
+        caminho_os = os.path.join(PASTA, "ATIVIDADES DAS O.S.xlsx")
+else:
+    caminho_os = os.path.join(PASTA, "ATIVIDADES DAS O.S.xlsx")
 if not os.path.exists(caminho_os):
     print(f"[ERRO] Planilha nao encontrada em nenhum caminho")
     sys.exit(1)
@@ -64,7 +66,7 @@ CDESL = idx.get("Tempo de Deslocamento", 22)
 COS_NUM = idx.get("Atividade", idx.get("Numero da Atividade", idx.get("N da Atividade", 4)))
 
 raw_os_data = []
-status_counts = {"Concluida": 0, "Cancelada": 0, "Nao Concluida": 0, "Suspensa": 0, "Pendente": 0}
+status_counts = {"Concluída": 0, "Cancelada": 0, "Não Concluída": 0, "Suspensa": 0, "Pendente": 0}
 motivos_canc = Counter()
 tags_tec, tags_city, tags_tipo, tags_dia = {}, {}, {}, {}
 tempos_duracao = []
@@ -77,8 +79,8 @@ for row in rows[1:]:
     if not status_raw: continue
     status_norm = _norm_status(status_raw)
     cat = "Pendente"
-    if "nao conclu" in status_norm:   cat = "Nao Concluida"
-    elif "conclu" in status_norm:     cat = "Concluida"
+    if "nao conclu" in status_norm:   cat = "Não Concluída"
+    elif "conclu" in status_norm:     cat = "Concluída"
     elif "cancel" in status_norm:     cat = "Cancelada"
     elif "suspen" in status_norm:     cat = "Suspensa"
     elif "iniciado" in status_norm or "em rota" in status_norm: cat = "Pendente"
@@ -95,7 +97,27 @@ for row in rows[1:]:
     data_key = "--"
     if data_raw:
         try:
-            dt_obj = data_raw if not isinstance(data_raw, str) else datetime.strptime(str(data_raw)[:10], "%Y-%m-%d")
+            if not isinstance(data_raw, str):
+                dt_obj = data_raw
+            else:
+                raw_str = str(data_raw).strip()
+                if " " in raw_str:
+                    raw_str = raw_str.split(" ")[0]
+                
+                if "-" in raw_str:
+                    parts = raw_str.split("-")
+                    if len(parts[0]) == 4:
+                        dt_obj = datetime.strptime(raw_str, "%Y-%m-%d")
+                    else:
+                        dt_obj = datetime.strptime(raw_str, "%d-%m-%Y")
+                elif "/" in raw_str:
+                    parts = raw_str.split("/")
+                    if len(parts[0]) == 4:
+                        dt_obj = datetime.strptime(raw_str, "%Y/%m/%d")
+                    else:
+                        dt_obj = datetime.strptime(raw_str, "%d/%m/%Y")
+                else:
+                    dt_obj = datetime.strptime(raw_str[:10], "%Y-%m-%d")
             data_key = dt_obj.strftime("%d/%m")
         except: pass
 
@@ -116,7 +138,7 @@ for row in rows[1:]:
 
     sla_flag = 0
     os_num = gv(row, COS_NUM)
-    if cat == "Concluida":
+    if cat == "Concluída":
         try:
             abertura = row[15]
             data_ativ = row[CD]
@@ -134,19 +156,19 @@ for row in rows[1:]:
         except: pass
 
     raw_os_data.append({"tec": recurso, "city": cidade, "status": cat, "type": tipo, "date": data_key, "motivo": motivo, "dur": dur_min, "desl": desl_min, "sla": sla_flag, "os": os_num})
-    if cat in ["Cancelada", "Nao Concluida"] and motivo: motivos_canc[motivo] += 1
+    if cat in ["Cancelada", "Não Concluída"] and motivo: motivos_canc[motivo] += 1
 
     for d, k in [(tags_tec, recurso), (tags_city, cidade), (tags_tipo, tipo)]:
         if k not in d: d[k] = {"key": k, "total": 0, "concluido": 0, "nao_concluido": 0, "cancelado": 0}
         d[k]["total"] += 1
-        if cat == "Concluida": d[k]["concluido"] += 1
-        elif cat == "Nao Concluida": d[k]["nao_concluido"] += 1
+        if cat == "Concluída": d[k]["concluido"] += 1
+        elif cat == "Não Concluída": d[k]["nao_concluido"] += 1
         elif cat == "Cancelada": d[k]["cancelado"] += 1
 
     if data_key != "--":
         if data_key not in tags_dia: tags_dia[data_key] = {"data": data_key, "total": 0, "concluido": 0}
         tags_dia[data_key]["total"] += 1
-        if cat == "Concluida": tags_dia[data_key]["concluido"] += 1
+        if cat == "Concluída": tags_dia[data_key]["concluido"] += 1
 
 wb.close()
 

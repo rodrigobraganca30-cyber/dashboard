@@ -13,8 +13,8 @@ let selected     = new Set();
 let activeClient = null; // cliente com chat aberto
 let pollTimer    = null;
 
-const STATUS_LABELS = { pendente:'⏳ Pendente', confirmado:'✅ Confirmado', 'nao-atendido':'📵 Não Atendeu', reagendado:'🔁 Reagendado' };
-const STATUS_ORDER  = ['pendente','confirmado','nao-atendido','reagendado'];
+const STATUS_LABELS = { pendente:'⏳ Pendente', confirmado:'✅ Confirmado', 'nao-atendido':'📵 Não Atendeu', reagendado:'🔁 Reagendado', 'numero-nao-pertence':'⛔ Nº Inválido' };
+const STATUS_ORDER  = ['pendente','confirmado','nao-atendido','reagendado','numero-nao-pertence'];
 
 // ──────────────────────────────────────────────
 // BACKEND HEALTH + STATUS SYNC
@@ -443,13 +443,14 @@ function rowHTML(c) {
 }
 
 function updateSummary() {
-  const counts = { pendente:0, confirmado:0, 'nao-atendido':0, reagendado:0 };
-  allClients.forEach(c => counts[getStatus(c)]++);
+  const counts = { pendente:0, confirmado:0, 'nao-atendido':0, reagendado:0, 'numero-nao-pertence':0 };
+  allClients.forEach(c => { const st = getStatus(c); if (counts[st] !== undefined) counts[st]++; else counts[st] = 1; });
   document.getElementById('s-total').textContent = allClients.length;
   document.getElementById('s-pend').textContent  = counts.pendente;
   document.getElementById('s-conf').textContent  = counts.confirmado;
   document.getElementById('s-nao').textContent   = counts['nao-atendido'];
   document.getElementById('s-reag').textContent  = counts.reagendado;
+  document.getElementById('s-inv').textContent   = counts['numero-nao-pertence'];
 }
 
 // ──────────────────────────────────────────────

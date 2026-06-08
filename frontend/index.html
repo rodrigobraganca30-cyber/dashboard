@@ -36,6 +36,7 @@
       <div class="stat"><div class="stat-val c-conf" id="s-conf">0</div><div class="stat-lbl">Confirmado</div></div>
       <div class="stat"><div class="stat-val c-nao" id="s-nao">0</div><div class="stat-lbl">Não Atendeu</div></div>
       <div class="stat"><div class="stat-val c-reag" id="s-reag">0</div><div class="stat-lbl">Reagendado</div></div>
+      <div class="stat"><div class="stat-val c-inv" id="s-inv">0</div><div class="stat-lbl">Nº Inválido</div></div>
     </div>
 
     <!-- CONTROLS -->
@@ -48,6 +49,7 @@
         <option value="confirmado">Confirmado</option>
         <option value="nao-atendido">Não Atendeu</option>
         <option value="reagendado">Reagendado</option>
+        <option value="numero-nao-pertence">⛔ Nº Inválido</option>
       </select>
       <input class="search" id="search" placeholder="🔍  Buscar cliente..." oninput="filterChanged()" onpaste="setTimeout(filterChanged,50)" onchange="filterChanged()">
       <div class="sel-bar">
