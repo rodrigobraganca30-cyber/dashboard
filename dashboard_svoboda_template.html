@@ -642,12 +642,21 @@ function rankIcon(i){ return i===0?'<span class="rank gold">🥇</span>':i===1?'
 
 // Controles de Navegação das páginas (Abas Superiores)
 function showPage(id, btn) {
-  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-  document.getElementById(id).classList.add('active');
+  document.querySelectorAll('.page').forEach(function(p){
+    p.classList.remove('active');
+    p.style.setProperty('display', 'none', 'important');
+  });
+  document.querySelectorAll('.nav-btn').forEach(function(b){
+    b.classList.remove('active');
+  });
+  var el = document.getElementById(id);
+  if(el){
+    el.classList.add('active');
+    el.style.setProperty('display', 'block', 'important');
+  }
   if (btn) btn.classList.add('active');
   var evoW = document.getElementById('evo-chart-wrapper');
-  if(evoW) evoW.style.display = (id==='visao-geral') ? 'block' : 'none';
+  if(evoW) evoW.style.setProperty('display', (id==='visao-geral') ? 'block' : 'none', 'important');
 }
 
 // Date
